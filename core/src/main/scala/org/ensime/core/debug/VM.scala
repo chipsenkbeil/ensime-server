@@ -6,85 +6,77 @@ import akka.actor.ActorRef
 import com.sun.jdi.request.{ EventRequest, EventRequestManager }
 import com.sun.jdi._
 import org.ensime.api._
+import org.scaladebugger.api.debuggers.{Debugger, AttachingDebugger, LaunchingDebugger}
+import org.scaladebugger.api.lowlevel.requests.properties.SuspendPolicyProperty
+import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
 import org.slf4j.LoggerFactory
 import org.ensime.util.file._
 
 import scala.collection.mutable.ListBuffer
 import scala.collection.{ Iterable, mutable }
+import scala.concurrent.{Await, Promise}
+import scala.concurrent.duration._
 
 class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broadcaster: ActorRef, sourceMap: SourceMap) {
   val log = LoggerFactory.getLogger("DebugVM")
 
   import scala.collection.JavaConversions._
 
-  private val vm: VirtualMachine = {
+  private val (debugger: Debugger, s: ScalaVirtualMachine) = {
     mode match {
       case VmStart(commandLine) ⇒
-        val connector = Bootstrap.virtualMachineManager().defaultConnector()
-        val arguments = connector.defaultArguments()
+        val p = Promise[ScalaVirtualMachine]
+        val f = p.future
 
-        val opts = arguments.get("options").value
-        val allVMOpts = (List(opts) ++ vmOptions).mkString(" ")
-        arguments.get("options").setValue(allVMOpts)
-        arguments.get("main").setValue(commandLine)
-        // set the debugged process into suspend mode so we can catch it and add
-        // breakpoints (see vm start  event), otherwise we have a race condition.
-        arguments.get("suspend").setValue("true")
+        val d = LaunchingDebugger(
+          className = commandLine,
+          jvmOptions = vmOptions,
+          suspend = true
+        )
 
-        log.info("Using Connector: " + connector.name + " : " + connector.description())
-        log.info("Connector class: " + connector.getClass.getName)
-        log.info("Debugger VM args: " + allVMOpts)
-        log.info("Debugger program args: " + commandLine)
-        connector.launch(arguments)
+        d.start(startProcessingEvents = false, p.trySuccess)
+
+        (d, Await.result(f, 10.seconds))
       case VmAttach(hostname, port) ⇒
-        log.info("Attach to running vm")
+        val p = Promise[ScalaVirtualMachine]
+        val f = p.future
 
-        val vmm = Bootstrap.virtualMachineManager()
-        val connector = vmm.attachingConnectors().get(0)
+        // Place JVM in running state
+        f.map(_.underlyingVirtualMachine).foreach(_.resume())
 
-        val env = connector.defaultArguments()
-        env.get("port").setValue(port)
-        env.get("hostname").setValue(hostname)
+        val d = AttachingDebugger(
+          port = port.toInt,
+          hostname = hostname
+        )
 
-        log.info("Using Connector: " + connector.name + " : " + connector.description())
-        log.info("Debugger arguments: " + env)
-        log.info("Attach to VM")
-        val vm = connector.attach(env)
-        log.info("VM: " + vm.description + ", " + vm)
-        // if the remote VM has been started in suspended state, we need to nudge it
-        // if the remote VM has been started in running state, this call seems to be a no-op
-        vm.resume()
-        vm
+        d.start(startProcessingEvents = false, p.trySuccess)
+
+        (d, Await.result(f, 10.seconds))
     }
   }
 
   //This flag is useful for debugging but not needed during general use
   // vm.setDebugTraceMode(VirtualMachine.TRACE_EVENTS)
-  val evtQ = new VMEventManager(vm.eventQueue(), debugManager)
-  val erm: EventRequestManager = vm.eventRequestManager();
-  {
-    val req = erm.createClassPrepareRequest()
-    req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-    req.enable()
-  }
-  {
-    val req = erm.createThreadStartRequest()
-    req.setSuspendPolicy(EventRequest.SUSPEND_NONE)
-    req.enable()
-  }
-  {
-    val req = erm.createThreadDeathRequest()
-    req.setSuspendPolicy(EventRequest.SUSPEND_NONE)
-    req.enable()
-  }
-  {
-    val req = erm.createExceptionRequest(null, false, true)
-    req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
-    req.enable()
-  }
+
+  //
+  // Initialize adding of classes
+  //
+  s.onUnsafeClassPrepare(SuspendPolicyProperty.AllThreads).foreach(e => {
+    val refType = e.referenceType()
+    typeAdded(refType)
+    tryPendingBreaksForSourcename(refType.sourceName())
+  })
+  s.onUnsafeThreadStart(SuspendPolicyProperty.NoThread)
+  s.onUnsafeThreadDeath(SuspendPolicyProperty.NoThread)
+  s.onUnsafeAllExceptions(
+    notifyCaught = false,
+    notifyUncaught = true,
+    SuspendPolicyProperty.AllThreads
+  )
+  s.onUnsafeVMDisconnect().foreach(_ => debugger.stop())
 
   private val fileToUnits = mutable.HashMap[String, mutable.HashSet[ReferenceType]]()
-  private val process = vm.process()
+  private val process = s.underlyingVirtualMachine.process()
   private val monitor = mode match {
     case VmAttach(_, _) => Nil
     case VmStart(_) => List(
@@ -95,17 +87,17 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
   private val savedObjects = new mutable.HashMap[DebugObjectId, ObjectReference]()
 
   def start(): Unit = {
-    evtQ.start()
+    s.lowlevel.eventManager.start()
+
     monitor.foreach { _.start() }
   }
 
   def exit(exitCode: Int): Unit = {
-    vm.exit(exitCode)
+    s.underlyingVirtualMachine.exit(exitCode)
   }
 
   def dispose() = try {
-    evtQ.finished = true
-    vm.dispose()
+    s.underlyingVirtualMachine.dispose()
     monitor.foreach { _.finished = true }
   } catch {
     case e: VMDisconnectedException =>
@@ -124,7 +116,7 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
   }
 
   def resume(): Unit = {
-    vm.resume()
+    s.underlyingVirtualMachine.resume()
   }
 
   def newStepRequest(thread: ThreadReference, stride: Int, depth: Int): Unit = {
