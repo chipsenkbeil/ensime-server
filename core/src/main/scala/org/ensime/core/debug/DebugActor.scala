@@ -27,6 +27,7 @@ class DebugActor(
    * @return The response to the user event
    */
   override def receive: Receive = LoggingReceive {
+    // ========================================================================
     case DebugStartReq(commandLine: String) =>
       vmm.stop()
 
@@ -38,13 +39,27 @@ class DebugActor(
 
       vmm.start(VmStart(commandLine), options)
 
-      DebugVmSuccess()
-    case DebugAttachReq(hostname, port) ⇒
-      sender ! handleDebugAttachReq(hostname, port)
+      sender ! DebugVmSuccess()
+    // ========================================================================
+    case DebugAttachReq(hostname, port) =>
+      vmm.stop()
+
+      // Include Ensime's runtime classpath for the launched JVM and
+      val options = Seq(
+        "-classpath",
+        config.runtimeClasspath.mkString("\"", File.pathSeparator, "\"")
+      ) ++ config.debugVMArgs
+
+      vmm.start(VmAttach(hostname, port), options)
+
+      sender ! DebugVmSuccess()
+    // ========================================================================
     case DebugActiveVmReq =>
-      sender ! handleRPCWithVM() { vm =>
-        TrueResponse
-      }
+      sender ! vmm.withVM(_ => TrueResponse).getOrElse({
+        // TODO: Log failure
+        FalseResponse
+      })
+    // ========================================================================
     case DebugStopReq =>
       sender ! handleRPCWithVM() { vm =>
         if (vm.mode.shouldExit) {
@@ -53,34 +68,41 @@ class DebugActor(
         vm.dispose()
         TrueResponse
       }
+    // ========================================================================
     case DebugRunReq =>
       sender ! handleRPCWithVM() { vm =>
         vm.resume()
         TrueResponse
       }
+    // ========================================================================
     case DebugContinueReq(threadId) =>
       sender ! handleRPCWithVMAndThread(threadId) {
         (vm, thread) =>
           vm.resume()
           TrueResponse
       }
+    // ========================================================================
     case DebugSetBreakReq(file, line: Int) =>
       if (!setBreakpoint(file, line)) {
         bgMessage("Location not loaded. Set pending breakpoint.")
       }
       sender ! TrueResponse
+    // ========================================================================
     case DebugClearBreakReq(file, line: Int) =>
       clearBreakpoint(file, line)
       sender ! TrueResponse
 
+    // ========================================================================
     case DebugClearAllBreaksReq =>
       clearAllBreakpoints()
       sender ! TrueResponse
 
+    // ========================================================================
     case DebugListBreakpointsReq =>
       val breaks = BreakpointList(activeBreakpoints.toList, pendingBreakpoints)
       sender ! breaks
 
+    // ========================================================================
     case DebugNextReq(threadId: DebugThreadId) =>
       sender ! handleRPCWithVMAndThread(threadId) {
         (vm, thread) =>
@@ -92,6 +114,7 @@ class DebugActor(
           TrueResponse
       }
 
+    // ========================================================================
     case DebugStepReq(threadId: DebugThreadId) =>
       sender ! handleRPCWithVMAndThread(threadId) {
         (vm, thread) =>
@@ -103,6 +126,7 @@ class DebugActor(
           TrueResponse
       }
 
+    // ========================================================================
     case DebugStepOutReq(threadId: DebugThreadId) =>
       sender ! handleRPCWithVMAndThread(threadId) {
         (vm, thread) =>
@@ -114,19 +138,23 @@ class DebugActor(
           TrueResponse
       }
 
+    // ========================================================================
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
       sender ! handleRPCWithVMAndThread(threadId) {
         (vm, thread) =>
           vm.locationForName(thread, name).getOrElse(FalseResponse)
       }
+    // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! handleRPCWithVMAndThread(threadId) { (vm, thread) =>
         vm.backtrace(thread, index, count)
       }
+    // ========================================================================
     case DebugValueReq(location) =>
       sender ! handleRPCWithVM() { vm =>
         vm.debugValueAtLocation(location).getOrElse(FalseResponse)
       }
+    // ========================================================================
     case DebugToStringReq(threadId, location) =>
       sender ! handleRPCWithVM() { vm =>
         vm.debugValueAtLocationToString(threadId, location) match {
@@ -135,6 +163,7 @@ class DebugActor(
         }
       }
 
+    // ========================================================================
     case DebugSetValueReq(location, newValue) =>
       sender ! handleRPCWithVM() { vm =>
         location match {
