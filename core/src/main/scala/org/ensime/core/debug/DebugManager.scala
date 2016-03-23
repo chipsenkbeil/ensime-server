@@ -10,24 +10,36 @@ import com.sun.jdi._
 import com.sun.jdi.event._
 import com.sun.jdi.request.StepRequest
 import org.ensime.api._
+import org.scaladebugger.api.debuggers.Debugger
+import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
 
 import scala.collection.mutable
+import scala.util.Try
 
 case class DMClassPrepareEvent(prepareEvent: ClassPrepareEvent, eventSet: EventSet)
 
 object DebugManager {
-  def apply(
-    broadcaster: ActorRef
-  )(
-    implicit
-    config: EnsimeConfig
-  ): Props = Props(new DebugManager(broadcaster, config))
+  def apply(broadcaster: ActorRef)(implicit config: EnsimeConfig): Props =
+    Props(new DebugManager(broadcaster, config))
 }
 
+/**
+ * Represents the main actor interfacing with the debugger infrastructure.
+ *
+ * @param broadcaster The actor used to send messages that should be broadcasted
+ *                    to all listening clients
+ * @param config The Ensime-specific configuration to associate with the
+ *               debugger
+ */
 class DebugManager(
-    broadcaster: ActorRef,
-    config: EnsimeConfig
+  private val broadcaster: ActorRef,
+  private val config: EnsimeConfig
 ) extends Actor with ActorLogging {
+  /** Used to manage the active, debuggee virtual machine. */
+  private val virtualMachineManager = new VirtualMachineManager(
+    s => {},
+    s => {}
+  )
 
   // TODO this is built once on startup - probably makes sense for it to be done each time a debug vm is created
   private var sourceMap = new SourceMap(config)
@@ -38,7 +50,6 @@ class DebugManager(
   // Map unqualified file names to sets of fully qualified paths.
   private val pendingBreaksBySourceName =
     new mutable.HashMap[String, mutable.HashSet[Breakpoint]].withDefault { _ => new mutable.HashSet }
-  private var maybeVM: Option[VM] = None
 
   def tryPendingBreaksForSourcename(sourceName: String): Unit = {
     for (breaks <- pendingBreaksBySourceName.get(sourceName)) {
@@ -50,6 +61,10 @@ class DebugManager(
   }
 
   def setBreakpoint(file: File, line: Int): Boolean = {
+    virtualMachineManager.withVM(s => {
+      s.getOrCreateBreakpointRequest()
+    })
+    maybeVM.exists(_.tryGetOrCreateBreakpointRequest(file, line))
     val applied = maybeVM.exists { vm => vm.setBreakpoint(file, line) }
     if (applied) {
       activeBreakpoints += Breakpoint(file, line)
@@ -97,11 +112,9 @@ class DebugManager(
   }
 
   def disconnectDebugVM(): Unit = {
-    withVM { vm =>
-      vm.dispose()
-    }
+    withJVM(_.underlyingVirtualMachine.dispose())
     moveActiveBreaksToPending()
-    maybeVM = None
+    jvm = None
     broadcaster ! DebugVMDisconnectEvent
   }
 
@@ -110,26 +123,8 @@ class DebugManager(
     config.runtimeClasspath.mkString("\"", File.pathSeparator, "\"")
   ) ++ config.debugVMArgs
 
-  def withVM[T](action: (VM => T)): Option[T] = {
-    maybeVM.synchronized {
-      try {
-        for (vm <- maybeVM) yield {
-          action(vm)
-        }
-      } catch {
-        case e: VMDisconnectedException =>
-          log.error(e, "Attempted interaction with disconnected VM:")
-          disconnectDebugVM()
-          None
-        case e: Throwable =>
-          log.error(e, "Exception thrown whilst handling vm action")
-          None
-      }
-    }
-  }
-
   private def handleRPCWithVM()(action: (VM => RpcResponse)): RpcResponse = {
-    withVM { vm =>
+    withJVM { vm =>
       action(vm)
     }.getOrElse {
       log.warning("Could not access debug VM.")
@@ -138,7 +133,7 @@ class DebugManager(
   }
 
   private def handleRPCWithVMAndThread(threadId: DebugThreadId)(action: ((VM, ThreadReference) => RpcResponse)): RpcResponse = {
-    withVM { vm =>
+    withJVM { vm =>
       (for (thread <- vm.threadById(threadId)) yield {
         action(vm, thread)
       }).getOrElse {
@@ -160,13 +155,13 @@ class DebugManager(
 
   def fromJvm: Receive = {
     case DebuggerShutdownEvent =>
-      withVM { vm =>
+      withJVM { vm =>
         vm.dispose()
       }
       context.stop(self)
 
     case DMClassPrepareEvent(prepareEvent, eventSet) =>
-      withVM { vm =>
+      withJVM { vm =>
         val refType = prepareEvent.referenceType()
         vm.typeAdded(refType)
         tryPendingBreaksForSourcename(refType.sourceName())
@@ -174,7 +169,7 @@ class DebugManager(
       eventSet.resume()
 
     case e: VMStartEvent =>
-      withVM { vm =>
+      withJVM { vm =>
         vm.initLocationMap()
         // by default we will attempt to start in suspended mode so we can attach breakpoints etc
         vm.resume()
@@ -201,7 +196,7 @@ class DebugManager(
         log.warning(s"Break position not found: ${loc.sourceName()} : ${loc.lineNumber()}")
       }
     case e: ExceptionEvent =>
-      withVM { vm => vm.remember(e.exception) }
+      withJVM { vm => vm.remember(e.exception) }
 
       val pos = if (e.catchLocation() != null) sourceMap.locToPos(e.catchLocation()) else None
       broadcaster ! DebugExceptionEvent(
@@ -217,7 +212,7 @@ class DebugManager(
       broadcaster ! DebugThreadStartEvent(DebugThreadId(e.thread().uniqueID()))
     case e: AccessWatchpointEvent =>
     case e: ClassPrepareEvent =>
-      withVM { vm =>
+      withJVM { vm =>
         log.info(s"ClassPrepareEvent: ${e.referenceType().name()}")
       }
     case e: ClassUnloadEvent =>
@@ -226,7 +221,7 @@ class DebugManager(
   }
 
   def disposeCurrentVM(): Unit = {
-    withVM { vm =>
+    withJVM { vm =>
       vm.dispose()
     }
   }

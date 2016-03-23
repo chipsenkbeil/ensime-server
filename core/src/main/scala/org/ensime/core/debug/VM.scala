@@ -6,6 +6,7 @@ import akka.actor.ActorRef
 import com.sun.jdi.request.{ EventRequest, EventRequestManager }
 import com.sun.jdi._
 import org.ensime.api._
+import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.debuggers.{Debugger, AttachingDebugger, LaunchingDebugger}
 import org.scaladebugger.api.lowlevel.requests.properties.SuspendPolicyProperty
 import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
@@ -22,58 +23,8 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
 
   import scala.collection.JavaConversions._
 
-  private val (debugger: Debugger, s: ScalaVirtualMachine) = {
-    mode match {
-      case VmStart(commandLine) ⇒
-        val p = Promise[ScalaVirtualMachine]
-        val f = p.future
-
-        val d = LaunchingDebugger(
-          className = commandLine,
-          jvmOptions = vmOptions,
-          suspend = true
-        )
-
-        d.start(startProcessingEvents = false, p.trySuccess)
-
-        (d, Await.result(f, 10.seconds))
-      case VmAttach(hostname, port) ⇒
-        val p = Promise[ScalaVirtualMachine]
-        val f = p.future
-
-        // Place JVM in running state
-        f.map(_.underlyingVirtualMachine).foreach(_.resume())
-
-        val d = AttachingDebugger(
-          port = port.toInt,
-          hostname = hostname
-        )
-
-        d.start(startProcessingEvents = false, p.trySuccess)
-
-        (d, Await.result(f, 10.seconds))
-    }
-  }
-
   //This flag is useful for debugging but not needed during general use
   // vm.setDebugTraceMode(VirtualMachine.TRACE_EVENTS)
-
-  //
-  // Initialize adding of classes
-  //
-  s.onUnsafeClassPrepare(SuspendPolicyProperty.AllThreads).foreach(e => {
-    val refType = e.referenceType()
-    typeAdded(refType)
-    tryPendingBreaksForSourcename(refType.sourceName())
-  })
-  s.onUnsafeThreadStart(SuspendPolicyProperty.NoThread)
-  s.onUnsafeThreadDeath(SuspendPolicyProperty.NoThread)
-  s.onUnsafeAllExceptions(
-    notifyCaught = false,
-    notifyUncaught = true,
-    SuspendPolicyProperty.AllThreads
-  )
-  s.onUnsafeVMDisconnect().foreach(_ => debugger.stop())
 
   private val fileToUnits = mutable.HashMap[String, mutable.HashSet[ReferenceType]]()
   private val process = s.underlyingVirtualMachine.process()
@@ -258,31 +209,6 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
     }
   }
 
-  private def makeFields(
-    tpeIn: ReferenceType,
-    obj: ObjectReference
-  ): List[DebugClassField] = {
-    tpeIn match {
-      case tpeIn: ClassType =>
-        var fields = List[DebugClassField]()
-        var tpe = tpeIn
-        while (tpe != null) {
-          var i = -1
-          fields = tpe.fields().map { f =>
-            i += 1
-            val value = obj.getValue(f)
-            DebugClassField(
-              i, f.name(),
-              f.typeName(),
-              valueSummary(value)
-            )
-          }.toList ++ fields
-          tpe = tpe.superclass
-        }
-        fields
-      case _ => List.empty
-    }
-  }
 
   private def fieldByName(obj: ObjectReference, name: String): Option[Field] = {
     val tpeIn = obj.referenceType
@@ -301,67 +227,6 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
     }
   }
 
-  private def makeDebugObj(value: ObjectReference): DebugObjectInstance = {
-    DebugObjectInstance(
-      valueSummary(value),
-      makeFields(value.referenceType(), value),
-      value.referenceType().name(),
-      DebugObjectId(value.uniqueID())
-    )
-  }
-
-  private def makeDebugStr(value: StringReference): DebugStringInstance = {
-    DebugStringInstance(
-      valueSummary(value),
-      makeFields(value.referenceType(), value),
-      value.referenceType().name(),
-      DebugObjectId(value.uniqueID())
-    )
-  }
-
-  private def makeDebugArr(value: ArrayReference): DebugArrayInstance = {
-    DebugArrayInstance(
-      value.length,
-      value.referenceType().name,
-      value.referenceType().asInstanceOf[ArrayType].componentTypeName(),
-      DebugObjectId(value.uniqueID)
-    )
-  }
-
-  private def makeDebugPrim(value: PrimitiveValue): DebugPrimitiveValue = DebugPrimitiveValue(
-    valueSummary(value),
-    value.`type`().name()
-  )
-
-  private def makeDebugNull(): DebugNullValue = DebugNullValue("Null")
-
-  private def makeDebugValue(value: Value): DebugValue = {
-    if (value == null) makeDebugNull()
-    else {
-      value match {
-        case v: ArrayReference => makeDebugArr(v)
-        case v: StringReference => makeDebugStr(v)
-        case v: ObjectReference => makeDebugObj(v)
-        case v: PrimitiveValue => makeDebugPrim(v)
-      }
-    }
-  }
-
-  def locationForName(thread: ThreadReference, name: String): Option[DebugLocation] = {
-    val stackFrame = thread.frame(0)
-    val objRef = stackFrame.thisObject()
-    if (name == "this") {
-      Some(DebugObjectReference(remember(objRef).uniqueID))
-    } else {
-      stackSlotForName(thread, name).map({ slot =>
-        DebugStackSlot(DebugThreadId(thread.uniqueID), slot.frame, slot.offset)
-      }).orElse(
-        fieldByName(objRef, name).flatMap { f =>
-          Some(DebugObjectField(DebugObjectId(objRef.uniqueID), f.name))
-        }
-      )
-    }
-  }
 
   private def valueAtLocation(location: DebugLocation): Option[Value] = {
     location match {
@@ -478,40 +343,6 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
     try { action } catch { case e: Exception => orElse }
   }
 
-  private def makeStackFrame(index: Int, frame: StackFrame): DebugStackFrame = {
-    val locals = ignoreErr({
-      frame.visibleVariables.zipWithIndex.map {
-        case (v, i) =>
-          DebugStackLocal(i, v.name,
-            valueSummary(frame.getValue(v)),
-            v.typeName())
-      }.toList
-    }, List.empty)
-
-    val numArgs = ignoreErr(frame.getArgumentValues.length, 0)
-    val methodName = ignoreErr(frame.location.method().name(), "Method")
-    val className = ignoreErr(frame.location.declaringType().name(), "Class")
-    val pcLocation = sourceMap.locToPos(frame.location).getOrElse(
-      LineSourcePosition(
-        File(frame.location.sourcePath()).canon,
-        frame.location.lineNumber
-      )
-    )
-    val thisObjId = ignoreErr(remember(frame.thisObject()).uniqueID, -1L)
-    DebugStackFrame(index, locals, numArgs, className, methodName, pcLocation, DebugObjectId(thisObjId))
-  }
-
-  def backtrace(thread: ThreadReference, index: Int, count: Int): DebugBacktrace = {
-    val frames = ListBuffer[DebugStackFrame]()
-    var i = index
-    while (i < thread.frameCount && (count == -1 || i < count)) {
-      val stackFrame = thread.frame(i)
-      frames += makeStackFrame(i, stackFrame)
-      i += 1
-    }
-    DebugBacktrace(frames.toList, DebugThreadId(thread.uniqueID()), thread.name())
-  }
-
   private def mirrorFromString(tpe: Type, toMirror: String): Option[Value] = {
     val s = toMirror.trim
     if (s.length > 0) {
@@ -533,8 +364,7 @@ class VM(val mode: VmMode, vmOptions: List[String], debugManager: ActorRef, broa
     } else None
   }
 
-  def setStackVar(thread: ThreadReference, frame: Int, offset: Int,
-    newValue: String): Boolean = {
+  def setStackVar(thread: ThreadReference, frame: Int, offset: Int, newValue: String): Boolean = {
     if (thread.frameCount > frame &&
       thread.frame(frame).visibleVariables.length > offset) {
       val stackFrame = thread.frame(frame)
