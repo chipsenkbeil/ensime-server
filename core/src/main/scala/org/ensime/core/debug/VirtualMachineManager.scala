@@ -6,7 +6,7 @@ import org.scaladebugger.api.lowlevel.requests.properties.SuspendPolicyProperty
 import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
 import org.slf4j.LoggerFactory
 
-import scala.util.Try
+import scala.util.{Failure, Try}
 
 /**
  * Represents a manager of virtual machines connected to Ensime.
@@ -22,6 +22,14 @@ class VirtualMachineManager(
   private val log = LoggerFactory.getLogger(this.getClass)
   @volatile private var debugger: Option[Debugger] = None
   @volatile private var vm: Option[ScalaVirtualMachine] = None
+  @volatile private var mode: Option[VmMode] = None
+
+  /**
+   * Represents the mode actively being used by the internal debugger.
+   *
+   * @return Some mode instance if active, otherwise None
+   */
+  def activeMode: Option[VmMode] = mode
 
   /**
    * Starts a new debugger using the specified VM mode.
@@ -73,6 +81,7 @@ class VirtualMachineManager(
     // Mark our debugger and acquired virtual machine as ready
     debugger = Some(d)
     vm = Some(s)
+    this.mode = Some(mode)
 
     // Invoke our start function, ignoring any error that may arise
     withVM(globalStartFunc)
@@ -92,6 +101,9 @@ class VirtualMachineManager(
     // Invoke our stop function, ignoring any error that may arise
     withVM(globalStopFunc)
     withVM(stopFunc)
+
+    // Clear our associated mode
+    mode = None
 
     // Dispose of the virtual machine and discard the reference
     withVM(_.underlyingVirtualMachine.dispose())
@@ -118,25 +130,23 @@ class VirtualMachineManager(
    * @tparam T The expected return value from the action
    * @return Some containing the result if successful, otherwise None
    */
-  def withVM[T](action: (ScalaVirtualMachine => T)): Option[T] = vm.synchronized {
+  def withVM[T](action: (ScalaVirtualMachine => T)): Try[T] = vm.synchronized {
     if (!hasActiveVM) {
       log.error("No VM active for debugging!")
-      return None
+      return Failure(new NoActiveVirtualMachineException)
     }
 
-    return vm.flatMap(s => {
-      val result = Try(action(s))
+    val result = Try(action(vm.get))
 
-      result.failed.foreach {
-        case e: VMDisconnectedException =>
-          log.error("Attempted interaction with disconnected VM:", e)
-          stop()
-        case e: Throwable =>
-          log.error("Exception thrown whilst handling vm action", e)
-      }
+    result.failed.foreach {
+      case e: VMDisconnectedException =>
+        log.error("Attempted interaction with disconnected VM:", e)
+        stop()
+      case e: Throwable =>
+        log.error("Exception thrown whilst handling vm action", e)
+    }
 
-      result.toOption
-    })
+    result
   }
 
   /**

@@ -4,8 +4,12 @@ import java.io.File
 
 import akka.actor.{ActorRef, Actor, ActorLogging}
 import akka.event.LoggingReceive
-import com.sun.jdi.request.StepRequest
 import org.ensime.api._
+import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
+import org.scaladebugger.api.profiles.traits.info.ThreadInfoProfile
+import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
+
+import scala.util.{Failure, Success, Try}
 
 /**
  * Represents the main entrypoint into the debugging interface of Ensime.
@@ -55,128 +59,203 @@ class DebugActor(
       sender ! DebugVmSuccess()
     // ========================================================================
     case DebugActiveVmReq =>
-      sender ! vmm.withVM(_ => TrueResponse).getOrElse({
-        // TODO: Log failure
-        FalseResponse
-      })
+      sender ! withVM(_ => TrueResponse)
     // ========================================================================
     case DebugStopReq =>
-      sender ! handleRPCWithVM() { vm =>
-        if (vm.mode.shouldExit) {
-          vm.exit(0)
-        }
-        vm.dispose()
+      sender ! withVM(s => {
+        // Force JVM exit if mode indicates to do so
+        if (vmm.activeMode.nonEmpty && vmm.activeMode.get.shouldExit)
+          s.underlyingVirtualMachine.exit(0)
+
+        vmm.stop()
         TrueResponse
-      }
+      })
     // ========================================================================
     case DebugRunReq =>
-      sender ! handleRPCWithVM() { vm =>
-        vm.resume()
+      sender ! withVM(s => {
+        s.underlyingVirtualMachine.resume()
         TrueResponse
-      }
+      })
     // ========================================================================
     case DebugContinueReq(threadId) =>
-      sender ! handleRPCWithVMAndThread(threadId) {
-        (vm, thread) =>
-          vm.resume()
-          TrueResponse
-      }
+      sender ! withThread(threadId.id, { case (s, t) =>
+        // TODO: Why is this resuming the entire VM instead of the single thread?
+        s.underlyingVirtualMachine.resume()
+        TrueResponse
+      })
     // ========================================================================
     case DebugSetBreakReq(file, line: Int) =>
-      if (!setBreakpoint(file, line)) {
-        bgMessage("Location not loaded. Set pending breakpoint.")
-      }
-      sender ! TrueResponse
+      sender ! withVM(s => {
+        fullFileName(s, file.getName) match {
+          case Some(fileName) =>
+            // TODO: Figure out why location examining needed to compare the
+            //       sourcePath, sourceName, and lineNumber for each location
+            //       pulled from the file's reference types AND its methods, why
+            //       do we need to look up the line that way?
+            // NOTE: If Scala Debugger API needs to change to match the old
+            //       functionality, just need to change the low-level class
+            //       manager's linesAndLocationsForFile method.
+            s.tryGetOrCreateBreakpointRequest(fileName, line) match {
+              case Success(bp) =>
+                // TODO: Improve pending API such that checking through the
+                //       list isn't needed
+                val isPending = s match {
+                  case p: PendingBreakpointSupportLike =>
+                    p.pendingBreakpointRequestsForFile(fileName)
+                      .exists(_.lineNumber == line)
+                  case _ => false
+                }
+
+                if (!isPending) {
+                  bgMessage(s"Resolved breakpoint at: $fileName : $line")
+                } else {
+                  bgMessage("Location not loaded. Set pending breakpoint.")
+                }
+
+                TrueResponse
+              case Failure(ex) =>
+                FalseResponse
+            }
+          case None => FalseResponse
+        }
+      })
     // ========================================================================
     case DebugClearBreakReq(file, line: Int) =>
-      clearBreakpoint(file, line)
+      import org.scaladebugger.api.profiles.Constants.CloseRemoveAll
+
+      vmm.withVM(s => {
+        // TODO: Provide API to remove breakpoints without potentially creating
+        //       them using the current retrieval API
+        fullFileName(s, file.getName)
+          .map(s.tryGetOrCreateBreakpointRequest(_, line))
+          .flatMap(_.toOption)
+          .foreach(_.close(data = CloseRemoveAll))
+      })
+
+      // Always send true response
       sender ! TrueResponse
 
     // ========================================================================
     case DebugClearAllBreaksReq =>
-      clearAllBreakpoints()
+      // TODO: Provide API to clear all breakpoints without needing to go
+      //       through the list one-by-one
+      import org.scaladebugger.api.profiles.Constants.CloseRemoveAll
+
+      // TODO: The pending breakpoints are mixed in with normal breakpoints,
+      //       so no need to retrieve them separately UNLESS we have a way to
+      //       get pending versus non-pending breakpoints
+      vmm.withVM(s => {
+        // TODO: Provide API to remove breakpoints without potentially creating
+        //       them using the current retrieval API
+        s.breakpointRequests.flatMap { case BreakpointRequestInfo(_, f, l, e) =>
+          s.tryGetOrCreateBreakpointRequest(f, l, e: _*).toOption
+        }.foreach(_.close(data = CloseRemoveAll))
+
+        // TODO: Provide better pending API access
+        (s match {
+          case p: PendingBreakpointSupportLike  => p.pendingBreakpointRequests
+          case _                                => Nil
+        }).flatMap { case BreakpointRequestInfo(_, f, l, e) =>
+          s.tryGetOrCreateBreakpointRequest(f, l, e: _*).toOption
+        }.foreach(_.close(data = CloseRemoveAll))
+      })
       sender ! TrueResponse
 
     // ========================================================================
     case DebugListBreakpointsReq =>
-      val breaks = BreakpointList(activeBreakpoints.toList, pendingBreakpoints)
-      sender ! breaks
+      val (activeBreakpoints, pendingBreakpoints) = vmm.withVM(s => {
+        val activeBreakpoints = s.breakpointRequests
+        val pendingBreakpoints = s match {
+          case p: PendingBreakpointSupportLike  => p.pendingBreakpointRequests
+          case _                                => Nil
+        }
+        (activeBreakpoints, pendingBreakpoints)
+      }).getOrElse((Nil, Nil))
 
+      sender ! BreakpointList(activeBreakpoints, pendingBreakpoints)
     // ========================================================================
     case DebugNextReq(threadId: DebugThreadId) =>
-      sender ! handleRPCWithVMAndThread(threadId) {
-        (vm, thread) =>
-          vm.newStepRequest(
-            thread,
-            StepRequest.STEP_LINE,
-            StepRequest.STEP_OVER
-          )
-          TrueResponse
-      }
-
+      sender ! withThread(threadId.id, { case (s, t) =>
+        s.stepOverLine(t)
+        TrueResponse
+      })
     // ========================================================================
     case DebugStepReq(threadId: DebugThreadId) =>
-      sender ! handleRPCWithVMAndThread(threadId) {
-        (vm, thread) =>
-          vm.newStepRequest(
-            thread,
-            StepRequest.STEP_LINE,
-            StepRequest.STEP_INTO
-          )
-          TrueResponse
-      }
-
+      sender ! withThread(threadId.id, { case (s, t) =>
+        s.stepIntoLine(t)
+        TrueResponse
+      })
     // ========================================================================
     case DebugStepOutReq(threadId: DebugThreadId) =>
-      sender ! handleRPCWithVMAndThread(threadId) {
-        (vm, thread) =>
-          vm.newStepRequest(
-            thread,
-            StepRequest.STEP_LINE,
-            StepRequest.STEP_OUT
-          )
-          TrueResponse
-      }
-
+      sender ! withThread(threadId.id, { case (s, t) =>
+        s.stepOutLine(t)
+        TrueResponse
+      })
     // ========================================================================
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
-      sender ! handleRPCWithVMAndThread(threadId) {
-        (vm, thread) =>
-          vm.locationForName(thread, name).getOrElse(FalseResponse)
+      sender ! withThread(threadId.id, { case (s, t) =>
+        if (name == "this") {
+          t.tryGetTopFrame.flatMap(_.tryGetThisObject).map {
+            case objRef => DebugObjectReference(objRef.uniqueId)
+          }.getOrElse(FalseResponse)
+        } else {
+          t.findVariableByName(name).map {
+            case v if v.isLocalVariable =>
+              DebugStackSlot(DebugThreadId(t.uniqueId), slot.frame, slot.offset)
+            case v if v.isField         =>
+              DebugObjectField(DebugObjectId(v.uniqueId), v.name)
+          }.getOrElse(FalseResponse)
+        }
       }
     // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
-      sender ! handleRPCWithVMAndThread(threadId) { (vm, thread) =>
-        vm.backtrace(thread, index, count)
-      }
+      sender ! withThread(threadId.id, { case (s, t) =>
+        // NOTE: -1 allows retrieving all frames starting at index going
+        //       backwards (3, 4, 5, ...)
+
+        // NOTE: Makes DebugStackFrame instances out of frames
+
+        DebugBacktrace(frames.toList, DebugThreadId(t.uniqueId), t.name)
+      })
     // ========================================================================
     case DebugValueReq(location) =>
-      sender ! handleRPCWithVM() { vm =>
-        vm.debugValueAtLocation(location).getOrElse(FalseResponse)
-      }
+      sender ! withVM(s => {
+        // TODO: Handles different cases
+        //
+        //    1. DebugObjectReference => valueForId
+        //    2. DebugObjectField => valueForField
+        //    3. DebugArrayElement => valueForIndex
+        //    4. DebugStackSlot => looks up thread by id, then valueForStackVar
+        //
+        s.valueAtLocation(location).getOrElse(FalseResponse)
+      })
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
-      sender ! handleRPCWithVM() { vm =>
-        vm.debugValueAtLocationToString(threadId, location) match {
-          case Some(strValue) => StringResponse(strValue)
-          case None => FalseResponse
-        }
-      }
-
+      sender ! withThread(threadId.id, { case (s, t) =>
+        s.valueAtLocation(location)
+          .map(_.toPrettyString)
+          .map(StringResponse(_))
+          .getOrElse(FalseResponse)
+      })
     // ========================================================================
     case DebugSetValueReq(location, newValue) =>
-      sender ! handleRPCWithVM() { vm =>
+      sender ! withVM(s => {
         location match {
-          case DebugStackSlot(threadId, frame, offset) => vm.threadById(threadId) match {
-            case Some(thread) =>
-              val status = vm.setStackVar(thread, frame, offset, newValue)
-              status match {
-                case true =>
-                  TrueResponse
-                case false =>
-                  FalseResponse
-              }
-            case _ =>
+          case DebugStackSlot(threadId, frame, offset) => s.tryGetThread(threadId.id) match {
+            case Success(t) =>
+              // TODO: Set value needs to perform some sort of casting OR
+              //       we do that earlier to provide the casting for setValue
+              //       based on the desired type (value type) since the new
+              //       value always comes in as a string
+              val actualNewValue = newValue
+
+              val result = t.tryGetFrame(frame)
+                .map(_.getLocalVariables)
+                .flatMap(v => Try(v(offset)))
+                .flatMap(_.trySetValue(actualNewValue))
+
+              if (result.isSuccess) TrueResponse else FalseResponse
+            case Failure(_) =>
               log.error(s"Unknown thread $threadId for debug-set-value")
               FalseResponse
           }
@@ -184,6 +263,78 @@ class DebugActor(
             log.error(s"Unsupported location type for debug-set-value.: $unknown")
             FalseResponse
         }
-      }
+      })
+  }
+
+  // ==========================================================================
+
+  /**
+   * Sends a background message through the broadcaster.
+   *
+   * @param msg The message content to send as a background message
+   */
+  private def bgMessage(msg: String): Unit = {
+    broadcaster ! SendBackgroundMessageEvent(msg)
+  }
+
+  /**
+   * Attempts to invoke the provided action against the active VM.
+   *
+   * @param action The action to execute against the virtual machine
+   * @tparam T The type of RpcResponse to return from the invocation
+   * @return An RPC response as the result of the action or a false response
+   *         if the action fails or VM is unavailable
+   */
+  private def withVM[T <: RpcResponse](action: ScalaVirtualMachine => T): RpcResponse = {
+    vmm.withVM(action).getOrElse({
+      // TODO: Log more information based on type of error
+      log.warning("Could not access debug VM.")
+      FalseResponse
+    })
+  }
+
+  /**
+   * Attempts to invoke the provided action against the specified thread.
+   *
+   * @param threadId The unique id of the thread to execute against
+   * @param action The action to execute against the thread
+   * @tparam T The type of RpcResponse to return from the invocation
+   * @return An RPC response as the result of the action or a false response
+   *         if the action fails or thread is unavailable
+   */
+  private def withThread[T <: RpcResponse](threadId: Long, action: (ScalaVirtualMachine, ThreadInfoProfile) => T): RpcResponse = {
+    withVM(s => {
+      s.tryGetThread(threadId).flatMap(t => Try(action(s, t))).getOrElse({
+        // TODO: Log more information based on type of error
+        log.warning(s"Unable to retrieve thread with id: $threadId")
+        FalseResponse
+      })
+    })
+  }
+
+  /**
+   * Retrieves the proper full file name from the virtual machine.
+   *
+   * @param scalaVirtualMachine The virtual machine whose classes to search
+   *                            through for the file name
+   * @param fileName The short file name to match against full names
+   * @return Some file name if a match is found, otherwise None
+   */
+  private def fullFileName(
+    scalaVirtualMachine: ScalaVirtualMachine,
+    fileName: String
+  ): Option[String] = {
+    // TODO: Improve this API so we don't need to touch low-level APIs
+    val fileNames = scalaVirtualMachine.lowlevel.classManager.allFileNames
+      .filter(_.endsWith(fileName))
+
+    val choice = fileNames.headOption
+
+    if (fileNames.isEmpty)
+      log.warning(s"$fileName was not found in available classes!")
+    else if (fileNames.size > 1)
+      log.warning(s"Ambiguous file $fileName, choosing ${choice.get}")
+
+    choice
   }
 }
