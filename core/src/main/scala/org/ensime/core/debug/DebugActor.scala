@@ -97,14 +97,7 @@ class DebugActor(
             //       manager's linesAndLocationsForFile method.
             s.tryGetOrCreateBreakpointRequest(fileName, line) match {
               case Success(bp) =>
-                // TODO: Improve pending API such that checking through the
-                //       list isn't needed
-                val isPending = s match {
-                  case p: PendingBreakpointSupportLike =>
-                    p.pendingBreakpointRequestsForFile(fileName)
-                      .exists(_.lineNumber == line)
-                  case _ => false
-                }
+                val isPending = s.isBreakpointRequestPending(fileName, line)
 
                 if (!isPending) {
                   bgMessage(s"Resolved breakpoint at: $fileName : $line")
