@@ -164,13 +164,12 @@ class DebugActor(
     // ========================================================================
     case DebugListBreakpointsReq =>
       val (activeBreakpoints, pendingBreakpoints) = vmm.withVM(s => {
-        val activeBreakpoints = s.breakpointRequests
-        val pendingBreakpoints = s match {
-          case p: PendingBreakpointSupportLike  => p.pendingBreakpointRequests
-          case _                                => Nil
-        }
-        (activeBreakpoints, pendingBreakpoints)
-      }).getOrElse((Nil, Nil))
+        val bps = s.breakpointRequests
+
+        (bps.filterNot(_.isPending), bps.filter(_.isPending))
+      }).map { case (a, p) =>
+        (a, p)
+      }.getOrElse((Nil, Nil))
 
       sender ! BreakpointList(activeBreakpoints, pendingBreakpoints)
     // ========================================================================
