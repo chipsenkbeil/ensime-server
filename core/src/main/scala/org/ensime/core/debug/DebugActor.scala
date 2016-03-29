@@ -59,6 +59,7 @@ class DebugActor(
       sender ! DebugVmSuccess()
     // ========================================================================
     case DebugActiveVmReq =>
+      // Send a true response if the VM is still available, otherwise false
       sender ! withVM(_ => TrueResponse)
     // ========================================================================
     case DebugStopReq =>
@@ -140,7 +141,7 @@ class DebugActor(
       vmm.withVM(s => {
         // TODO: Provide API to remove breakpoints without potentially creating
         //       them using the current retrieval API
-        s.breakpointRequests.flatMap { case BreakpointRequestInfo(_, f, l, e) =>
+        s.breakpointRequests.flatMap { case BreakpointRequestInfo(_, _, f, l, e) =>
           s.tryGetOrCreateBreakpointRequest(f, l, e: _*).toOption
         }.foreach(_.close(data = CloseRemoveAll))
 
@@ -148,7 +149,7 @@ class DebugActor(
         (s match {
           case p: PendingBreakpointSupportLike  => p.pendingBreakpointRequests
           case _                                => Nil
-        }).flatMap { case BreakpointRequestInfo(_, f, l, e) =>
+        }).flatMap { case BreakpointRequestInfo(_, _, f, l, e) =>
           s.tryGetOrCreateBreakpointRequest(f, l, e: _*).toOption
         }.foreach(_.close(data = CloseRemoveAll))
       })
