@@ -115,15 +115,9 @@ class DebugActor(
       })
     // ========================================================================
     case DebugClearBreakReq(file, line: Int) =>
-      import org.scaladebugger.api.profiles.Constants.CloseRemoveAll
-
       vmm.withVM(s => {
-        // TODO: Provide API to remove breakpoints without potentially creating
-        //       them using the current retrieval API
         fullFileName(s, file.getName)
-          .map(s.tryGetOrCreateBreakpointRequest(_, line))
-          .flatMap(_.toOption)
-          .foreach(_.close(data = CloseRemoveAll))
+          .foreach(s.removeBreakpointRequests(_, line))
       })
 
       // Always send true response
@@ -131,32 +125,14 @@ class DebugActor(
 
     // ========================================================================
     case DebugClearAllBreaksReq =>
-      // TODO: Provide API to clear all breakpoints without needing to go
-      //       through the list one-by-one
-      import org.scaladebugger.api.profiles.Constants.CloseRemoveAll
-
-      // TODO: The pending breakpoints are mixed in with normal breakpoints,
-      //       so no need to retrieve them separately UNLESS we have a way to
-      //       get pending versus non-pending breakpoints
-      vmm.withVM(s => {
-        // TODO: Provide API to remove breakpoints without potentially creating
-        //       them using the current retrieval API
-        s.breakpointRequests.flatMap { case BreakpointRequestInfo(_, _, f, l, e) =>
-          s.tryGetOrCreateBreakpointRequest(f, l, e: _*).toOption
-        }.foreach(_.close(data = CloseRemoveAll))
-
-        // TODO: Provide better pending API access
-        (s match {
-          case p: PendingBreakpointSupportLike  => p.pendingBreakpointRequests
-          case _                                => Nil
-        }).flatMap { case BreakpointRequestInfo(_, _, f, l, e) =>
-          s.tryGetOrCreateBreakpointRequest(f, l, e: _*).toOption
-        }.foreach(_.close(data = CloseRemoveAll))
-      })
+      vmm.withVM(_.removeAllBreakpointRequests())
       sender ! TrueResponse
 
     // ========================================================================
     case DebugListBreakpointsReq =>
+      // TODO: The pending breakpoints are mixed in with normal breakpoints,
+      //       so no need to retrieve them separately UNLESS we have a way to
+      //       get pending versus non-pending breakpoints
       val (activeBreakpoints, pendingBreakpoints) = vmm.withVM(s => {
         val bps = s.breakpointRequests
 
