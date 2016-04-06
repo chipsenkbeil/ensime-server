@@ -130,9 +130,6 @@ class DebugActor(
 
     // ========================================================================
     case DebugListBreakpointsReq =>
-      // TODO: The pending breakpoints are mixed in with normal breakpoints,
-      //       so no need to retrieve them separately UNLESS we have a way to
-      //       get pending versus non-pending breakpoints
       val (activeBreakpoints, pendingBreakpoints) = vmm.withVM(s => {
         val bps = s.breakpointRequests
 
@@ -293,9 +290,7 @@ class DebugActor(
     scalaVirtualMachine: ScalaVirtualMachine,
     fileName: String
   ): Option[String] = {
-    // TODO: Improve this API so we don't need to touch low-level APIs
-    val fileNames = scalaVirtualMachine.lowlevel.classManager.allFileNames
-      .filter(_.endsWith(fileName))
+    val fileNames = scalaVirtualMachine.sourceNameToPaths(fileName)
 
     val choice = fileNames.headOption
 
