@@ -161,10 +161,12 @@ class DebugActor(
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
       sender ! withThread(threadId.id, { case (s, t) =>
         if (name == "this") {
+          // TODO: Cache retrieved object
           t.tryGetTopFrame.flatMap(_.tryGetThisObject).map {
             case objRef => DebugObjectReference(objRef.uniqueId)
           }.getOrElse(FalseResponse)
         } else {
+          // TODO: Cache retrieved object
           t.findVariableByName(name).map {
             case v if v.isLocalVariable =>
               DebugStackSlot(DebugThreadId(t.uniqueId), slot.frame, slot.offset)
@@ -181,28 +183,55 @@ class DebugActor(
 
         // NOTE: Makes DebugStackFrame instances out of frames
 
+        // TODO: This object is cached for each stack frame
         DebugBacktrace(frames.toList, DebugThreadId(t.uniqueId), t.name)
       })
     // ========================================================================
     case DebugValueReq(location) =>
-      sender ! withVM(s => {
-        // TODO: Handles different cases
-        //
-        //    1. DebugObjectReference => valueForId
-        //    2. DebugObjectField => valueForField
-        //    3. DebugArrayElement => valueForIndex
-        //    4. DebugStackSlot => looks up thread by id, then valueForStackVar
-        //
-        s.valueAtLocation(location).getOrElse(FalseResponse)
-      })
+      // TODO: Handles different cases
+      //
+      //    1. DebugObjectReference => valueForId
+      //    2. DebugObjectField => valueForField
+      //    3. DebugArrayElement => valueForIndex
+      //    4. DebugStackSlot => looks up thread by id, then valueForStackVar
+      //
+      sender ! withVM(s => (location match {
+        case DebugObjectReference(objectId) =>
+          None // Retrieves cached object
+        case DebugObjectField(objectId, fieldName) =>
+          // Uses cached object with id to find associated field
+          None // Caches retrieved field object
+        case DebugArrayElement(objectId, index) =>
+          // Uses cached object with id as array to find element
+          None // Caches retrieved element object
+        case DebugStackSlot(threadId, frame, offset) =>
+          None // Caches retrieved slot object
+        case _ =>
+          None
+          // TODO: Exception is cached when an exception event is received
+          s.valueAtLocation(location).getOrElse(FalseResponse)
+      }).getOrElse(FalseResponse))
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        s.valueAtLocation(location)
-          .map(_.toPrettyString)
-          .map(StringResponse(_))
-          .getOrElse(FalseResponse)
-      })
+      sender ! withVM(s => (location match {
+        case DebugObjectReference(objectId) =>
+          None // Retrieves cached object
+        case DebugObjectField(objectId, fieldName) =>
+          // Uses cached object with id to find associated field
+          None // Caches retrieved field object
+        case DebugArrayElement(objectId, index) =>
+          // Uses cached object with id as array to find element
+          None // Caches retrieved element object
+        case DebugStackSlot(threadId, frame, offset) =>
+          None // Caches retrieved slot object
+        case _ =>
+          None
+          // TODO: Exception is cached when an exception event is received
+          s.valueAtLocation(location)
+            .map(_.toPrettyString)
+            .map(StringResponse(_))
+            .getOrElse(FalseResponse)
+      }).getOrElse(FalseResponse))
     // ========================================================================
     case DebugSetValueReq(location, newValue) =>
       sender ! withVM(s => {
@@ -213,7 +242,7 @@ class DebugActor(
               //       we do that earlier to provide the casting for setValue
               //       based on the desired type (value type) since the new
               //       value always comes in as a string
-              val actualNewValue = newValue
+              val actualNewValue = newValue ---
 
               val result = t.tryGetFrame(frame)
                 .map(_.getLocalVariables)
