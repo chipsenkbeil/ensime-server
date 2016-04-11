@@ -2,11 +2,11 @@ package org.ensime.core.debug
 
 import java.io.File
 
-import akka.actor.{ActorRef, Actor, ActorLogging}
+import akka.actor.{Actor, ActorLogging, ActorRef}
 import akka.event.LoggingReceive
 import org.ensime.api._
 import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
-import org.scaladebugger.api.profiles.traits.info.ThreadInfoProfile
+import org.scaladebugger.api.profiles.traits.info.{IndexedVariableInfoProfile, ObjectInfoProfile, ThreadInfoProfile}
 import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
 
 import scala.util.{Failure, Success, Try}
@@ -163,18 +163,23 @@ class DebugActor(
         if (name == "this") {
           // TODO: Cache retrieved object
           t.tryGetTopFrame.flatMap(_.tryGetThisObject).map {
-            case objRef => DebugObjectReference(objRef.uniqueId)
+            case objectReference =>
+              DebugObjectReference(objectReference.uniqueId)
           }.getOrElse(FalseResponse)
         } else {
           // TODO: Cache retrieved object
-          t.findVariableByName(name).map {
-            case v if v.isLocalVariable =>
-              DebugStackSlot(DebugThreadId(t.uniqueId), slot.frame, slot.offset)
-            case v if v.isField         =>
-              DebugObjectField(DebugObjectId(v.uniqueId), v.name)
+          t.findVariableByName(name).flatMap {
+            case v: IndexedVariableInfoProfile  =>
+              Some(DebugStackSlot(DebugThreadId(t.uniqueId), v.frameIndex, v.offsetIndex))
+            case v if v.isField                 => v.toValue match {
+              case o: ObjectInfoProfile =>
+                Some(DebugObjectField(DebugObjectId(o.uniqueId), v.name))
+              case _                    =>
+                None
+            }
           }.getOrElse(FalseResponse)
         }
-      }
+      })
     // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! withThread(threadId.id, { case (s, t) =>
@@ -222,7 +227,7 @@ class DebugActor(
         case DebugArrayElement(objectId, index) =>
           // Uses cached object with id as array to find element
           None // Caches retrieved element object
-        case DebugStackSlot(threadId, frame, offset) =>
+        case DebugStackSlot(_, frame, offset) =>
           None // Caches retrieved slot object
         case _ =>
           None
