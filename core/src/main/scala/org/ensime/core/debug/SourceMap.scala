@@ -44,8 +44,9 @@ class SourceMap(private val config: EnsimeConfig) {
   def newLineSourcePosition(
     location: LocationInfoProfile
   ): Option[LineSourcePosition] = {
-    findFileByLocation(location)
-      .map(f => LineSourcePosition(f, location.getLineNumber))
+    findFileByLocation(location).map(f =>
+      LineSourcePosition(f, location.getLineNumber)
+    )
   }
 
   /**
@@ -57,17 +58,7 @@ class SourceMap(private val config: EnsimeConfig) {
   def findFileByLocation(location: LocationInfoProfile): Option[File] = {
     val path = location.tryGetSourcePath.toOption
 
-    // Check if we have a match in the cached path map first
-    val cachedResult = path.flatMap(pathMap.get)
-
-    // If no cached result, search through all of sources to find a match
-    val result = path.flatMap(p => sources.find(_.getAbsolutePath.endsWith(p)))
-
-    // Store the found result as our new cached result
-    if (path.nonEmpty && cachedResult.isEmpty && result.nonEmpty)
-      pathMap.put(path.get, result.get)
-
-    cachedResult.orElse(result)
+    path.flatMap(sourceForFilePath)
   }
 
   /**
@@ -75,10 +66,31 @@ class SourceMap(private val config: EnsimeConfig) {
    * given file name.
    *
    * @param fileName The name of the file whose matches to retrieve
-   * @return The set of sources  whose file name match the given name
+   * @return The set of sources whose file name match the given name
    */
   def sourcesForFileName(fileName: String): Set[File] =
     sourceMap.getOrElse(fileName, Set())
+
+  /**
+   * Retrieves the current Scala source available through Ensime with the
+   * given file path.
+   *
+   * @param filePath The path of the file whose match to retrieve
+   * @return Some source whose file path matches the given path, otherwise None
+   */
+  def sourceForFilePath(filePath: String): Option[File] = {
+    // Check if we have a match in the cached path map first
+    val cachedResult = pathMap.get(filePath)
+
+    // If no cached result, search through all of sources to find a match
+    val result = sources.find(_.getAbsolutePath.endsWith(filePath))
+
+    // Store the found result as our new cached result
+    if (cachedResult.isEmpty && result.nonEmpty)
+      pathMap.put(filePath, result.get)
+
+    cachedResult.orElse(result)
+  }
 
   /**
    * Retrieves current Scala sources available through Ensime.

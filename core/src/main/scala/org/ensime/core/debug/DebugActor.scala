@@ -24,6 +24,7 @@ class DebugActor(
   private val config: EnsimeConfig
 ) extends Actor with ActorLogging {
   private val vmm: VirtualMachineManager = new VirtualMachineManager()
+  private val sourceMap: SourceMap = new SourceMap(config = config)
 
   /**
    * Receives user-based events and processes them.
@@ -135,7 +136,12 @@ class DebugActor(
 
         (bps.filterNot(_.isPending), bps.filter(_.isPending))
       }).map { case (a, p) =>
-        (a, p)
+        /** Convert collection of BreakpointRequestInfo to Ensime Breakpoint */
+        def convert(b: Seq[BreakpointRequestInfo]) = b.map(b2 =>
+          (sourceMap.sourceForFilePath(b2.fileName), b2.lineNumber)
+        ).filter(_._1.nonEmpty).map(t => Breakpoint(t._1.get, t._2))
+
+        (convert(a).toList, convert(p).toList)
       }.getOrElse((Nil, Nil))
 
       sender ! BreakpointList(activeBreakpoints, pendingBreakpoints)
