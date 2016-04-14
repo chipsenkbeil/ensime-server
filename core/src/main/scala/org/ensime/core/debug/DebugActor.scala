@@ -5,6 +5,7 @@ import java.io.File
 import akka.actor.{Actor, ActorLogging, ActorRef}
 import akka.event.LoggingReceive
 import org.ensime.api._
+import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
 import org.scaladebugger.api.profiles.traits.info.{IndexedVariableInfoProfile, ObjectInfoProfile, ThreadInfoProfile}
 import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
@@ -167,18 +168,18 @@ class DebugActor(
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
       sender ! withThread(threadId.id, { case (s, t) =>
         if (name == "this") {
-          // TODO: Cache retrieved object
           t.tryGetTopFrame.flatMap(_.tryGetThisObject).map {
             case objectReference =>
+              objectReference.cache()
               DebugObjectReference(objectReference.uniqueId)
           }.getOrElse(FalseResponse)
         } else {
-          // TODO: Cache retrieved object
           t.findVariableByName(name).flatMap {
             case v: IndexedVariableInfoProfile  =>
               Some(DebugStackSlot(DebugThreadId(t.uniqueId), v.frameIndex, v.offsetIndex))
             case v if v.isField                 => v.toValue match {
               case o: ObjectInfoProfile =>
+                o.cache()
                 Some(DebugObjectField(DebugObjectId(o.uniqueId), v.name))
               case _                    =>
                 None
@@ -224,25 +225,24 @@ class DebugActor(
       }).getOrElse(FalseResponse))
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
+      // TODO: Exception is cached when an exception event is received
       sender ! withVM(s => (location match {
         case DebugObjectReference(objectId) =>
-          None // Retrieves cached object
+          s.cache.load(objectId.id)
         case DebugObjectField(objectId, fieldName) =>
           // Uses cached object with id to find associated field
-          None // Caches retrieved field object
+          // TODO: Add caching function to field and local variable to cache
+          //       their respective values
+          s.cache.load(objectId.id).map(_.getField(fieldName))
         case DebugArrayElement(objectId, index) =>
           // Uses cached object with id as array to find element
+          s.cache.load(objectId.id)
           None // Caches retrieved element object
         case DebugStackSlot(_, frame, offset) =>
           None // Caches retrieved slot object
         case _ =>
           None
-          // TODO: Exception is cached when an exception event is received
-          s.valueAtLocation(location)
-            .map(_.toPrettyString)
-            .map(StringResponse(_))
-            .getOrElse(FalseResponse)
-      }).getOrElse(FalseResponse))
+      }).map(_.toPrettyString).map(StringResponse(_)).getOrElse(FalseResponse))
     // ========================================================================
     case DebugSetValueReq(location, newValue) =>
       sender ! withVM(s => {
@@ -291,13 +291,13 @@ class DebugActor(
    * @return An RPC response as the result of the action or a false response
    *         if the action fails or VM is unavailable
    */
-  private def withVM[T <: RpcResponse](action: ScalaVirtualMachine => T): RpcResponse = {
-    vmm.withVM(action).getOrElse({
-      // TODO: Log more information based on type of error
-      log.warning("Could not access debug VM.")
-      FalseResponse
-    })
-  }
+  private def withVM[T <: RpcResponse](
+    action: ScalaVirtualMachine => T
+  ): RpcResponse = vmm.withVM(action).getOrElse({
+    // TODO: Log more information based on type of error
+    log.warning("Could not access debug VM.")
+    FalseResponse
+  })
 
   /**
    * Attempts to invoke the provided action against the specified thread.
@@ -308,15 +308,16 @@ class DebugActor(
    * @return An RPC response as the result of the action or a false response
    *         if the action fails or thread is unavailable
    */
-  private def withThread[T <: RpcResponse](threadId: Long, action: (ScalaVirtualMachine, ThreadInfoProfile) => T): RpcResponse = {
-    withVM(s => {
-      s.tryGetThread(threadId).flatMap(t => Try(action(s, t))).getOrElse({
-        // TODO: Log more information based on type of error
-        log.warning(s"Unable to retrieve thread with id: $threadId")
-        FalseResponse
-      })
+  private def withThread[T <: RpcResponse](
+    threadId: Long,
+    action: (ScalaVirtualMachine, ThreadInfoProfile) => T
+  ): RpcResponse = withVM(s => {
+    s.tryGetThread(threadId).flatMap(t => Try(action(s, t))).getOrElse({
+      // TODO: Log more information based on type of error
+      log.warning(s"Unable to retrieve thread with id: $threadId")
+      FalseResponse
     })
-  }
+  })
 
   /**
    * Retrieves the proper full file name from the virtual machine.
