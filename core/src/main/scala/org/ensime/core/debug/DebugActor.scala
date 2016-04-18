@@ -7,7 +7,7 @@ import akka.event.LoggingReceive
 import org.ensime.api._
 import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
-import org.scaladebugger.api.profiles.traits.info.{IndexedVariableInfoProfile, ObjectInfoProfile, ThreadInfoProfile}
+import org.scaladebugger.api.profiles.traits.info.{ArrayInfoProfile, IndexedVariableInfoProfile, ObjectInfoProfile, ThreadInfoProfile}
 import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
 
 import scala.util.{Failure, Success, Try}
@@ -170,17 +170,15 @@ class DebugActor(
         if (name == "this") {
           t.tryGetTopFrame.flatMap(_.tryGetThisObject).map {
             case objectReference =>
-              objectReference.cache()
-              DebugObjectReference(objectReference.uniqueId)
+              DebugObjectReference(objectReference.cache().uniqueId)
           }.getOrElse(FalseResponse)
         } else {
           t.findVariableByName(name).flatMap {
             case v: IndexedVariableInfoProfile  =>
-              Some(DebugStackSlot(DebugThreadId(t.uniqueId), v.frameIndex, v.offsetIndex))
+              Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
             case v if v.isField                 => v.toValue match {
               case o: ObjectInfoProfile =>
-                o.cache()
-                Some(DebugObjectField(DebugObjectId(o.uniqueId), v.name))
+                Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), v.name))
               case _                    =>
                 None
             }
@@ -209,19 +207,30 @@ class DebugActor(
       //
       sender ! withVM(s => (location match {
         case DebugObjectReference(objectId) =>
+          s.cache.load(objectId.id)
           None // Retrieves cached object
         case DebugObjectField(objectId, fieldName) =>
           // Uses cached object with id to find associated field
+          s.cache.load(objectId.id).map(_.getField(fieldName)).map(_.cache())
           None // Caches retrieved field object
         case DebugArrayElement(objectId, index) =>
           // Uses cached object with id as array to find element
+          s.cache.load(objectId.id).flatMap {
+            case a: ArrayInfoProfile  => Some(a)
+            case _                    => None
+          }.map(_.getValue(index)).map(_.cache())
           None // Caches retrieved element object
         case DebugStackSlot(threadId, frame, offset) =>
+          s.cache.load(threadId.id).flatMap {
+            case t: ThreadInfoProfile => Some(t)
+            case _                    => None
+          }.flatMap(_.findVariableByIndex(frame, offset)).map(_.cache())
+
           None // Caches retrieved slot object
         case _ =>
           None
           // TODO: Exception is cached when an exception event is received
-          s.valueAtLocation(location).getOrElse(FalseResponse)
+          s.valueAtLocation(location).map(makeDebugValue).getOrElse(FalseResponse)
       }).getOrElse(FalseResponse))
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
