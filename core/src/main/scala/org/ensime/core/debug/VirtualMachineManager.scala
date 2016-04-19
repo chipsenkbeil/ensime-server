@@ -61,6 +61,7 @@ class VirtualMachineManager(
         val s = d.start(timeout = 10.seconds, startProcessingEvents = false)
 
         (d, s)
+
       case VmAttach(hostname, port) =>
         val d = AttachingDebugger(
           port = port.toInt,
@@ -177,7 +178,7 @@ class VirtualMachineManager(
       notifyCaught = false,
       notifyUncaught = true,
       SuspendPolicyProperty.AllThreads
-    )
+    ).foreach(_.exception())
 
     // If our VM disconnects, stop the debugger
     // TODO: This is not wise if we are using a Listening debugger which can have

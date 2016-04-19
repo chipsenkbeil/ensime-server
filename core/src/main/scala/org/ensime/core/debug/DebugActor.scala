@@ -7,8 +7,8 @@ import akka.event.LoggingReceive
 import org.ensime.api._
 import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
-import org.scaladebugger.api.profiles.traits.info.{ArrayInfoProfile, IndexedVariableInfoProfile, ObjectInfoProfile, ThreadInfoProfile}
-import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
+import org.scaladebugger.api.profiles.traits.info._
+import org.scaladebugger.api.virtualmachines.{ObjectCache, ScalaVirtualMachine}
 
 import scala.util.{Failure, Success, Try}
 
@@ -137,6 +137,7 @@ class DebugActor(
 
         (bps.filterNot(_.isPending), bps.filter(_.isPending))
       }).map { case (a, p) =>
+
         /** Convert collection of BreakpointRequestInfo to Ensime Breakpoint */
         def convert(b: Seq[BreakpointRequestInfo]) = b.map(b2 =>
           (sourceMap.sourceForFilePath(b2.fileName), b2.lineNumber)
@@ -174,12 +175,12 @@ class DebugActor(
           }.getOrElse(FalseResponse)
         } else {
           t.findVariableByName(name).flatMap {
-            case v: IndexedVariableInfoProfile  =>
+            case v: IndexedVariableInfoProfile =>
               Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
-            case v if v.isField                 => v.toValue match {
+            case v if v.isField => v.toValue match {
               case o: ObjectInfoProfile =>
                 Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), v.name))
-              case _                    =>
+              case _ =>
                 None
             }
           }.getOrElse(FalseResponse)
@@ -188,70 +189,28 @@ class DebugActor(
     // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! withThread(threadId.id, { case (s, t) =>
-        // NOTE: -1 allows retrieving all frames starting at index going
-        //       backwards (3, 4, 5, ...)
-
         // NOTE: Makes DebugStackFrame instances out of frames
+        val frames = t.getFrames(index, count).map(convertToEnsimeMessage)
 
         // TODO: This object is cached for each stack frame
         DebugBacktrace(frames.toList, DebugThreadId(t.uniqueId), t.name)
       })
     // ========================================================================
     case DebugValueReq(location) =>
-      // TODO: Handles different cases
-      //
-      //    1. DebugObjectReference => valueForId
-      //    2. DebugObjectField => valueForField
-      //    3. DebugArrayElement => valueForIndex
-      //    4. DebugStackSlot => looks up thread by id, then valueForStackVar
-      //
-      sender ! withVM(s => (location match {
-        case DebugObjectReference(objectId) =>
-          s.cache.load(objectId.id)
-          None // Retrieves cached object
-        case DebugObjectField(objectId, fieldName) =>
-          // Uses cached object with id to find associated field
-          s.cache.load(objectId.id).map(_.getField(fieldName)).map(_.cache())
-          None // Caches retrieved field object
-        case DebugArrayElement(objectId, index) =>
-          // Uses cached object with id as array to find element
-          s.cache.load(objectId.id).flatMap {
-            case a: ArrayInfoProfile  => Some(a)
-            case _                    => None
-          }.map(_.getValue(index)).map(_.cache())
-          None // Caches retrieved element object
-        case DebugStackSlot(threadId, frame, offset) =>
-          s.cache.load(threadId.id).flatMap {
-            case t: ThreadInfoProfile => Some(t)
-            case _                    => None
-          }.flatMap(_.findVariableByIndex(frame, offset)).map(_.cache())
-
-          None // Caches retrieved slot object
-        case _ =>
-          None
-          // TODO: Exception is cached when an exception event is received
-          s.valueAtLocation(location).map(makeDebugValue).getOrElse(FalseResponse)
-      }).getOrElse(FalseResponse))
+      sender ! withVM(s =>
+        lookupValue(s.cache, location)
+          .map(convertToEnsimeMessage)
+          .getOrElse(FalseResponse)
+      )
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
       // TODO: Exception is cached when an exception event is received
-      sender ! withVM(s => (location match {
-        case DebugObjectReference(objectId) =>
-          s.cache.load(objectId.id)
-        case DebugObjectField(objectId, fieldName) =>
-          // Uses cached object with id to find associated field
-          // TODO: Add caching function to field and local variable to cache
-          //       their respective values
-          s.cache.load(objectId.id).map(_.getField(fieldName))
-        case DebugArrayElement(objectId, index) =>
-          // Uses cached object with id as array to find element
-          s.cache.load(objectId.id)
-          None // Caches retrieved element object
-        case DebugStackSlot(_, frame, offset) =>
-          None // Caches retrieved slot object
-        case _ =>
-          None
-      }).map(_.toPrettyString).map(StringResponse(_)).getOrElse(FalseResponse))
+      sender ! withVM(s =>
+        lookupValue(s.cache, location)
+          .map(_.toPrettyString)
+          .map(StringResponse(_))
+          .getOrElse(FalseResponse)
+      )
     // ========================================================================
     case DebugSetValueReq(location, newValue) =>
       sender ! withVM(s => {
@@ -264,12 +223,10 @@ class DebugActor(
               //       value always comes in as a string
               val actualNewValue = newValue ---
 
-              val result = t.tryGetFrame(frame)
-                .map(_.getLocalVariables)
-                .flatMap(v => Try(v(offset)))
-                .flatMap(_.trySetValue(actualNewValue))
-
-              if (result.isSuccess) TrueResponse else FalseResponse
+              t.findVariableByIndex(frame, offset)
+                .flatMap(_.trySetValue(actualNewValue).toOption)
+                .map(_ => TrueResponse)
+                .getOrElse(FalseResponse)
             case Failure(_) =>
               log.error(s"Unknown thread $threadId for debug-set-value")
               FalseResponse
@@ -312,7 +269,7 @@ class DebugActor(
    * Attempts to invoke the provided action against the specified thread.
    *
    * @param threadId The unique id of the thread to execute against
-   * @param action The action to execute against the thread
+   * @param action   The action to execute against the thread
    * @tparam T The type of RpcResponse to return from the invocation
    * @return An RPC response as the result of the action or a false response
    *         if the action fails or thread is unavailable
@@ -333,7 +290,7 @@ class DebugActor(
    *
    * @param scalaVirtualMachine The virtual machine whose classes to search
    *                            through for the file name
-   * @param fileName The short file name to match against full names
+   * @param fileName            The short file name to match against full names
    * @return Some file name if a match is found, otherwise None
    */
   private def fullFileName(
@@ -350,5 +307,47 @@ class DebugActor(
       log.warning(s"Ambiguous file $fileName, choosing ${choice.get}")
 
     choice
+  }
+
+  /**
+   * Finds a value using the provided object cache and location information.
+   *
+   * @param objectCache The object cache used to retrieve the value or
+   *                    another object associated with the value
+   * @param location The Ensime location information for the value to retrieve
+   * @return Some value profile if the value is found, otherwise None
+   */
+  private def lookupValue(
+    objectCache: ObjectCache,
+    location: DebugLocation
+  ): Option[ValueInfoProfile] = location match {
+    // Retrieves cached object
+    case DebugObjectReference(objectId) =>
+      objectCache.load(objectId.id)
+
+    // Uses cached object with id to find associated field
+    // Caches retrieved field object
+    case DebugObjectField(objectId, fieldName) =>
+      objectCache.load(objectId.id)
+        .map(_.getField(fieldName))
+        .map(_.toValue.cache())
+
+    // Uses cached object with id as array to find element
+    // Caches retrieved element object
+    case DebugArrayElement(objectId, index) =>
+      objectCache.load(objectId.id).flatMap {
+        case a: ArrayInfoProfile => Some(a)
+        case _ => None
+      }.map(_.getValue(index).cache())
+
+    // Caches retrieved slot object
+    case DebugStackSlot(threadId, frame, offset) =>
+      objectCache.load(threadId.id).flatMap {
+        case t: ThreadInfoProfile => Some(t)
+        case _ => None
+      }.flatMap(_.findVariableByIndex(frame, offset)).map(_.toValue.cache())
+
+    // Unrecognized location request, so return nothing
+    case _ => None
   }
 }

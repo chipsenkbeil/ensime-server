@@ -2,132 +2,136 @@ package org.ensime.core.debug
 
 import com.sun.jdi._
 import org.ensime.api._
+import org.scaladebugger.api.profiles.traits.info._
+import org.scaladebugger.api.dsl.Implicits._
+import java.io.File
 
-import scala.collection.mutable.ListBuffer
 
 /**
  * Converts normal JDI structures into their equivalent Ensime-oriented
  * messages.
+ *
+ * @param sourceMap Used to include relevant source information when
+ *                  constructing various Ensime messages
  */
-class StructureConverter {
+class StructureConverter(private val sourceMap: SourceMap) {
 
-  def makeFields(tpeIn: ReferenceType, obj: ObjectReference): List[DebugClassField] = {
-    tpeIn match {
-      case tpeIn: ClassType =>
-        var fields = List[DebugClassField]()
-        var tpe = tpeIn
-        while (tpe != null) {
-          var i = -1
-          fields = tpe.fields().map { f =>
-            i += 1
-            val value = obj.getValue(f)
-            DebugClassField(
-              i, f.name(),
-              f.typeName(),
-              valueSummary(value)
-            )
-          }.toList ++ fields
-          tpe = tpe.superclass
-        }
-        fields
-      case _ => List.empty
-    }
+  /**
+   * Converts a debugger API value into an Ensime message.
+   *
+   * @param valueInfo The debugger API value
+   * @return The Ensime message
+   */
+  def makeDebugValue(valueInfo: ValueInfoProfile): DebugValue = valueInfo match {
+    case v if v.isNull                      => makeDebugNull()
+    case v if v.isVoid                      => makeDebugVoid(v)
+    case v: ArrayInfoProfile                => makeDebugArr(v)
+    case v: ObjectInfoProfile if v.isString => makeDebugStr(v)
+    case v: ObjectInfoProfile               => makeDebugObj(v)
+    case v: PrimitiveInfoProfile            => makeDebugPrim(v)
   }
 
-  def makeDebugObj(value: ObjectReference): DebugObjectInstance = {
+  def makeDebugObj(value: ObjectInfoProfile): DebugObjectInstance = {
     DebugObjectInstance(
-      valueSummary(value),
-      makeFields(value.referenceType(), value),
-      value.referenceType().name(),
-      DebugObjectId(value.uniqueID())
+      value.toPrettyString,
+      makeFields(value.getReferenceType, value),
+      value.getReferenceType.getName,
+      DebugObjectId(value.uniqueId)
     )
   }
 
-  def makeDebugStr(value: StringReference): DebugStringInstance = {
+  def makeDebugStr(value: ObjectInfoProfile): DebugStringInstance = {
     DebugStringInstance(
-      valueSummary(value),
-      makeFields(value.referenceType(), value),
-      value.referenceType().name(),
-      DebugObjectId(value.uniqueID())
+      value.toPrettyString,
+      makeFields(value.getReferenceType, value),
+      value.getReferenceType.getName,
+      DebugObjectId(value.uniqueId)
     )
   }
 
-  def makeDebugArr(value: ArrayReference): DebugArrayInstance = {
+  def makeDebugArr(value: ArrayInfoProfile): DebugArrayInstance = {
     DebugArrayInstance(
       value.length,
-      value.referenceType().name,
+      value.getReferenceType.getName,
       value.referenceType().asInstanceOf[ArrayType].componentTypeName(),
-      DebugObjectId(value.uniqueID)
+      DebugObjectId(value.uniqueId)
     )
   }
 
-  def makeDebugPrim(value: PrimitiveValue): DebugPrimitiveValue = DebugPrimitiveValue(
+  def makeDebugPrim(value: PrimitiveInfoProfile): DebugPrimitiveValue = DebugPrimitiveValue(
     valueSummary(value),
     value.`type`().name()
   )
 
+  // TODO: This
+  def makeDebugVoid(value: ValueInfoProfile): DebugPrimitiveValue = {
+    DebugPrimitiveValue(
+      value.toPrettyString,
+      /* VoidValue.`type`().name() */
+    )
+  }
+
   def makeDebugNull(): DebugNullValue = DebugNullValue("Null")
 
-  def makeDebugValue(value: Value): DebugValue = {
-    if (value == null) makeDebugNull()
-    else {
-      value match {
-        case v: ArrayReference => makeDebugArr(v)
-        case v: StringReference => makeDebugStr(v)
-        case v: ObjectReference => makeDebugObj(v)
-        case v: PrimitiveValue => makeDebugPrim(v)
-      }
+  def makeFields(tpeIn: ReferenceType, obj: ObjectReference): List[DebugClassField] = {
+    if (!tpeIn.isClassType) return List.empty
+
+    var fields = List[DebugClassField]()
+    var tpe = tpeIn
+    while (tpe != null) {
+      var i = -1
+      fields = tpe.fields().map { f =>
+        i += 1
+        val value = obj.getValue(f)
+        DebugClassField(
+          i, f.name(),
+          f.typeName(),
+          valueSummary(value)
+        )
+      }.toList ++ fields
+      tpe = tpe.superclass
     }
+    fields
   }
 
-  def locationForName(thread: ThreadReference, name: String): Option[DebugLocation] = {
-    val stackFrame = thread.frame(0)
-    val objRef = stackFrame.thisObject()
-    if (name == "this") {
-      Some(DebugObjectReference(remember(objRef).uniqueID))
-    } else {
-      stackSlotForName(thread, name).map({ slot =>
-        DebugStackSlot(DebugThreadId(thread.uniqueID), slot.frame, slot.offset)
-      }).orElse(
-        fieldByName(objRef, name).flatMap { f =>
-          Some(DebugObjectField(DebugObjectId(objRef.uniqueID), f.name))
-        }
-      )
-    }
-  }
-
-  def makeStackFrame(index: Int, frame: StackFrame): DebugStackFrame = {
-    val locals = ignoreErr({
-      frame.visibleVariables.zipWithIndex.map {
-        case (v, i) =>
-          DebugStackLocal(i, v.name,
-            valueSummary(frame.getValue(v)),
-            v.typeName())
-      }.toList
-    }, List.empty)
+  def makeStackFrame(frame: FrameInfoProfile): DebugStackFrame = {
+    val locals = ignoreErr(
+      frame.getLocalVariables.map(makeStackLocal).toList,
+      List.empty
+    )
 
     val numArgs = ignoreErr(frame.getArgumentValues.length, 0)
-    val methodName = ignoreErr(frame.location.method().name(), "Method")
-    val className = ignoreErr(frame.location.declaringType().name(), "Class")
+    val methodName = ignoreErr(frame.getLocation.getMethod.name, "Method")
+    val className = ignoreErr(frame.getLocation.getDeclaringType.getName, "Class")
     val pcLocation = sourceMap.locToPos(frame.location).getOrElse(
       LineSourcePosition(
         File(frame.location.sourcePath()).canon,
         frame.location.lineNumber
       )
     )
-    val thisObjId = ignoreErr(remember(frame.thisObject()).uniqueID, -1L)
-    DebugStackFrame(index, locals, numArgs, className, methodName, pcLocation, DebugObjectId(thisObjId))
+    val thisObjId = ignoreErr(frame.getThisObject.cache().uniqueId, -1L)
+    DebugStackFrame(frame.index, locals, numArgs, className, methodName, pcLocation, DebugObjectId(thisObjId))
   }
 
-  def backtrace(thread: ThreadReference, index: Int, count: Int): DebugBacktrace = {
-    val frames = ListBuffer[DebugStackFrame]()
-    var i = index
-    while (i < thread.frameCount && (count == -1 || i < count)) {
-      val stackFrame = thread.frame(i)
-      frames += makeStackFrame(i, stackFrame)
-      i += 1
-    }
-    DebugBacktrace(frames.toList, DebugThreadId(thread.uniqueID()), thread.name())
+  def makeStackLocal(variableInfo: IndexedVariableInfoProfile): DebugStackLocal = {
+    DebugStackLocal(
+      variableInfo.offsetIndex,
+      variableInfo.name,
+      variableInfo.toValue.toPrettyString,
+      variableInfo.typeName()
+    )
   }
 
+  /**
+   * Executes the provided action, yielding a executing a different action if
+   * it fails.
+   *
+   * @param action The action to execute
+   * @param orElse The other action to execute if the first fails
+   * @tparam T The return type of both actions
+   * @return The result from executing the first or second action
+   */
+  private def ignoreErr[T](action: => T, orElse: => T): T = {
+    try { action } catch { case e: Exception => orElse }
+  }
 }
