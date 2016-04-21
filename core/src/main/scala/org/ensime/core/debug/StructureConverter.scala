@@ -1,11 +1,8 @@
 package org.ensime.core.debug
 
-import com.sun.jdi._
 import org.ensime.api._
-import org.scaladebugger.api.profiles.traits.info._
 import org.scaladebugger.api.dsl.Implicits._
-import java.io.File
-
+import org.scaladebugger.api.profiles.traits.info._
 
 /**
  * Converts normal JDI structures into their equivalent Ensime-oriented
@@ -34,8 +31,8 @@ class StructureConverter(private val sourceMap: SourceMap) {
   def makeDebugObj(value: ObjectInfoProfile): DebugObjectInstance = {
     DebugObjectInstance(
       value.toPrettyString,
-      makeFields(value.getReferenceType, value),
-      value.getReferenceType.getName,
+      makeFields(value.referenceType, value),
+      value.referenceType.name,
       DebugObjectId(value.uniqueId)
     )
   }
@@ -43,8 +40,8 @@ class StructureConverter(private val sourceMap: SourceMap) {
   def makeDebugStr(value: ObjectInfoProfile): DebugStringInstance = {
     DebugStringInstance(
       value.toPrettyString,
-      makeFields(value.getReferenceType, value),
-      value.getReferenceType.getName,
+      makeFields(value.referenceType, value),
+      value.referenceType.name,
       DebugObjectId(value.uniqueId)
     )
   }
@@ -52,64 +49,68 @@ class StructureConverter(private val sourceMap: SourceMap) {
   def makeDebugArr(value: ArrayInfoProfile): DebugArrayInstance = {
     DebugArrayInstance(
       value.length,
-      value.getReferenceType.getName,
-      value.referenceType().asInstanceOf[ArrayType].componentTypeName(),
+      value.referenceType.name,
+      value.referenceType.toArrayType.elementTypeName,
       DebugObjectId(value.uniqueId)
     )
   }
 
   def makeDebugPrim(value: PrimitiveInfoProfile): DebugPrimitiveValue = DebugPrimitiveValue(
-    valueSummary(value),
-    value.`type`().name()
+    value.toPrettyString,
+    value.typeInfo.name
   )
 
-  // TODO: This
   def makeDebugVoid(value: ValueInfoProfile): DebugPrimitiveValue = {
     DebugPrimitiveValue(
       value.toPrettyString,
-      /* VoidValue.`type`().name() */
+      value.typeInfo.name
     )
   }
 
   def makeDebugNull(): DebugNullValue = DebugNullValue("Null")
 
-  def makeFields(tpeIn: ReferenceType, obj: ObjectReference): List[DebugClassField] = {
+  def makeFields(
+    tpeIn: ReferenceTypeInfoProfile,
+    obj: ObjectInfoProfile
+  ): List[DebugClassField] = {
     if (!tpeIn.isClassType) return List.empty
 
     var fields = List[DebugClassField]()
-    var tpe = tpeIn
-    while (tpe != null) {
+    var tpe: Option[ClassTypeInfoProfile] = Some(tpeIn.toClassType)
+    while (tpe.nonEmpty) {
       var i = -1
-      fields = tpe.fields().map { f =>
+      fields = tpe.get.allFields.map { f =>
         i += 1
-        val value = obj.getValue(f)
         DebugClassField(
-          i, f.name(),
-          f.typeName(),
-          valueSummary(value)
+          i, f.name,
+          f.typeName,
+          f.toValue.toPrettyString
         )
       }.toList ++ fields
-      tpe = tpe.superclass
+
+      tpe = tpe.get.superclass
     }
     fields
   }
 
   def makeStackFrame(frame: FrameInfoProfile): DebugStackFrame = {
     val locals = ignoreErr(
-      frame.getLocalVariables.map(makeStackLocal).toList,
+      frame.localVariables.map(makeStackLocal).toList,
       List.empty
     )
 
-    val numArgs = ignoreErr(frame.getArgumentValues.length, 0)
-    val methodName = ignoreErr(frame.getLocation.getMethod.name, "Method")
-    val className = ignoreErr(frame.getLocation.getDeclaringType.getName, "Class")
-    val pcLocation = sourceMap.locToPos(frame.location).getOrElse(
+    val numArgs = ignoreErr(frame.argumentValues.length, 0)
+    val methodName = ignoreErr(frame.location.method.name, "Method")
+    val className = ignoreErr(frame.location.declaringType.name, "Class")
+
+    import org.ensime.util.file._
+    val pcLocation = sourceMap.newLineSourcePosition(frame.location).getOrElse(
       LineSourcePosition(
-        File(frame.location.sourcePath()).canon,
+        File(frame.location.sourcePath).canon,
         frame.location.lineNumber
       )
     )
-    val thisObjId = ignoreErr(frame.getThisObject.cache().uniqueId, -1L)
+    val thisObjId = ignoreErr(frame.thisObject.cache().uniqueId, -1L)
     DebugStackFrame(frame.index, locals, numArgs, className, methodName, pcLocation, DebugObjectId(thisObjId))
   }
 
@@ -118,7 +119,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
       variableInfo.offsetIndex,
       variableInfo.name,
       variableInfo.toValue.toPrettyString,
-      variableInfo.typeName()
+      variableInfo.typeName
     )
   }
 

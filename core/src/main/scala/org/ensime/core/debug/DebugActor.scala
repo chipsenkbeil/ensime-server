@@ -26,6 +26,7 @@ class DebugActor(
 ) extends Actor with ActorLogging {
   private val vmm: VirtualMachineManager = new VirtualMachineManager()
   private val sourceMap: SourceMap = new SourceMap(config = config)
+  private val converter: StructureConverter = new StructureConverter(sourceMap)
 
   /**
    * Receives user-based events and processes them.
@@ -169,7 +170,7 @@ class DebugActor(
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
       sender ! withThread(threadId.id, { case (s, t) =>
         if (name == "this") {
-          t.tryGetTopFrame.flatMap(_.tryGetThisObject).map {
+          t.tryTopFrame.flatMap(_.tryThisObject).map {
             case objectReference =>
               DebugObjectReference(objectReference.cache().uniqueId)
           }.getOrElse(FalseResponse)
@@ -189,17 +190,20 @@ class DebugActor(
     // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! withThread(threadId.id, { case (s, t) =>
-        // NOTE: Makes DebugStackFrame instances out of frames
-        val frames = t.getFrames(index, count).map(convertToEnsimeMessage)
+        val frames = t.frames(index, count)
 
-        // TODO: This object is cached for each stack frame
-        DebugBacktrace(frames.toList, DebugThreadId(t.uniqueId), t.name)
+        // Cache each stack frame's "this" reference
+        frames.foreach(_.thisObject.cache())
+
+        val ensimeFrames = frames.map(converter.makeStackFrame)
+
+        DebugBacktrace(ensimeFrames.toList, DebugThreadId(t.uniqueId), t.name)
       })
     // ========================================================================
     case DebugValueReq(location) =>
       sender ! withVM(s =>
         lookupValue(s.cache, location)
-          .map(convertToEnsimeMessage)
+          .map(converter.makeDebugValue)
           .getOrElse(FalseResponse)
       )
     // ========================================================================
@@ -215,7 +219,7 @@ class DebugActor(
     case DebugSetValueReq(location, newValue) =>
       sender ! withVM(s => {
         location match {
-          case DebugStackSlot(threadId, frame, offset) => s.tryGetThread(threadId.id) match {
+          case DebugStackSlot(threadId, frame, offset) => s.tryThread(threadId.id) match {
             case Success(t) =>
               // TODO: Set value needs to perform some sort of casting OR
               //       we do that earlier to provide the casting for setValue
@@ -278,7 +282,7 @@ class DebugActor(
     threadId: Long,
     action: (ScalaVirtualMachine, ThreadInfoProfile) => T
   ): RpcResponse = withVM(s => {
-    s.tryGetThread(threadId).flatMap(t => Try(action(s, t))).getOrElse({
+    s.tryThread(threadId).flatMap(t => Try(action(s, t))).getOrElse({
       // TODO: Log more information based on type of error
       log.warning(s"Unable to retrieve thread with id: $threadId")
       FalseResponse
@@ -329,7 +333,7 @@ class DebugActor(
     // Caches retrieved field object
     case DebugObjectField(objectId, fieldName) =>
       objectCache.load(objectId.id)
-        .map(_.getField(fieldName))
+        .map(_.field(fieldName))
         .map(_.toValue.cache())
 
     // Uses cached object with id as array to find element
@@ -338,7 +342,7 @@ class DebugActor(
       objectCache.load(objectId.id).flatMap {
         case a: ArrayInfoProfile => Some(a)
         case _ => None
-      }.map(_.getValue(index).cache())
+      }.map(_.value(index).cache())
 
     // Caches retrieved slot object
     case DebugStackSlot(threadId, frame, offset) =>
