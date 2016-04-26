@@ -45,7 +45,7 @@ class SourceMap(private val config: EnsimeConfig) {
     location: LocationInfoProfile
   ): Option[LineSourcePosition] = {
     findFileByLocation(location).map(f =>
-      LineSourcePosition(f, location.getLineNumber)
+      LineSourcePosition(f, location.lineNumber)
     )
   }
 
@@ -56,7 +56,7 @@ class SourceMap(private val config: EnsimeConfig) {
    * @return Some file representing the local source, otherwise None
    */
   def findFileByLocation(location: LocationInfoProfile): Option[File] = {
-    val path = location.tryGetSourcePath.toOption
+    val path = location.trySourcePath.toOption
 
     path.flatMap(sourceForFilePath)
   }

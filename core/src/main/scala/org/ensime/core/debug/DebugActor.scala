@@ -7,6 +7,7 @@ import akka.event.LoggingReceive
 import org.ensime.api._
 import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
+import org.scaladebugger.api.lowlevel.events.EventType
 import org.scaladebugger.api.profiles.traits.info._
 import org.scaladebugger.api.virtualmachines.{ObjectCache, ScalaVirtualMachine}
 
@@ -24,9 +25,21 @@ class DebugActor(
   private val broadcaster: ActorRef,
   private val config: EnsimeConfig
 ) extends Actor with ActorLogging {
-  private val vmm: VirtualMachineManager = new VirtualMachineManager()
   private val sourceMap: SourceMap = new SourceMap(config = config)
   private val converter: StructureConverter = new StructureConverter(sourceMap)
+  private val vmm: VirtualMachineManager = new VirtualMachineManager(
+    // Bind our event handlers (breakpoint, step, thread start, etc.) and signal
+    // to the user that the JVM has started
+    globalStartFunc = s => {
+      bindEventHandlers(s)
+
+      broadcaster ! DebugVMStartEvent
+    },
+
+    // Signal to the user that the JVM has disconnected
+    // TODO: Move active breakpoints to pending?
+    globalStopFunc = s => broadcaster ! DebugVMDisconnectEvent
+  )
 
   /**
    * Receives user-based events and processes them.
@@ -44,9 +57,15 @@ class DebugActor(
         config.runtimeClasspath.mkString("\"", File.pathSeparator, "\"")
       ) ++ config.debugVMArgs
 
-      vmm.start(VmStart(commandLine), options)
+      // TODO: Error will be a future timeout, need to see if can grab reason
+      Try(vmm.start(VmStart(commandLine), options)).failed.foreach(t => {
+        log.error(t, "Failure during VM startup")
+        val message = t.toString
+        DebugVmError(1, message)
+      })
 
       sender ! DebugVmSuccess()
+
     // ========================================================================
     case DebugAttachReq(hostname, port) =>
       vmm.stop()
@@ -57,13 +76,20 @@ class DebugActor(
         config.runtimeClasspath.mkString("\"", File.pathSeparator, "\"")
       ) ++ config.debugVMArgs
 
-      vmm.start(VmAttach(hostname, port), options)
+      // TODO: Error will be a future timeout, need to see if can grab reason
+      Try(vmm.start(VmAttach(hostname, port), options)).failed.foreach(t => {
+        log.error(t, "Failure during VM startup")
+        val message = t.toString
+        DebugVmError(1, message)
+      })
 
       sender ! DebugVmSuccess()
+
     // ========================================================================
     case DebugActiveVmReq =>
       // Send a true response if the VM is still available, otherwise false
       sender ! withVM(_ => TrueResponse)
+
     // ========================================================================
     case DebugStopReq =>
       sender ! withVM(s => {
@@ -74,12 +100,19 @@ class DebugActor(
         vmm.stop()
         TrueResponse
       })
+
+    // ========================================================================
+    case DebuggerShutdownEvent =>
+      vmm.stop()
+      context.stop(self)
+
     // ========================================================================
     case DebugRunReq =>
       sender ! withVM(s => {
         s.underlyingVirtualMachine.resume()
         TrueResponse
       })
+
     // ========================================================================
     case DebugContinueReq(threadId) =>
       sender ! withThread(threadId.id, { case (s, t) =>
@@ -87,6 +120,7 @@ class DebugActor(
         s.underlyingVirtualMachine.resume()
         TrueResponse
       })
+
     // ========================================================================
     case DebugSetBreakReq(file, line: Int) =>
       sender ! withVM(s => {
@@ -116,6 +150,7 @@ class DebugActor(
           case None => FalseResponse
         }
       })
+
     // ========================================================================
     case DebugClearBreakReq(file, line: Int) =>
       vmm.withVM(s => {
@@ -148,24 +183,28 @@ class DebugActor(
       }.getOrElse((Nil, Nil))
 
       sender ! BreakpointList(activeBreakpoints, pendingBreakpoints)
+
     // ========================================================================
     case DebugNextReq(threadId: DebugThreadId) =>
       sender ! withThread(threadId.id, { case (s, t) =>
         s.stepOverLine(t)
         TrueResponse
       })
+
     // ========================================================================
     case DebugStepReq(threadId: DebugThreadId) =>
       sender ! withThread(threadId.id, { case (s, t) =>
         s.stepIntoLine(t)
         TrueResponse
       })
+
     // ========================================================================
     case DebugStepOutReq(threadId: DebugThreadId) =>
       sender ! withThread(threadId.id, { case (s, t) =>
         s.stepOutLine(t)
         TrueResponse
       })
+
     // ========================================================================
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
       sender ! withThread(threadId.id, { case (s, t) =>
@@ -187,6 +226,7 @@ class DebugActor(
           }.getOrElse(FalseResponse)
         }
       })
+
     // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! withThread(threadId.id, { case (s, t) =>
@@ -199,6 +239,7 @@ class DebugActor(
 
         DebugBacktrace(ensimeFrames.toList, DebugThreadId(t.uniqueId), t.name)
       })
+
     // ========================================================================
     case DebugValueReq(location) =>
       sender ! withVM(s =>
@@ -206,6 +247,7 @@ class DebugActor(
           .map(converter.makeDebugValue)
           .getOrElse(FalseResponse)
       )
+
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
       // TODO: Exception is cached when an exception event is received
@@ -215,22 +257,25 @@ class DebugActor(
           .map(StringResponse(_))
           .getOrElse(FalseResponse)
       )
+
     // ========================================================================
     case DebugSetValueReq(location, newValue) =>
       sender ! withVM(s => {
         location match {
           case DebugStackSlot(threadId, frame, offset) => s.tryThread(threadId.id) match {
             case Success(t) =>
-              // TODO: Set value needs to perform some sort of casting OR
-              //       we do that earlier to provide the casting for setValue
-              //       based on the desired type (value type) since the new
-              //       value always comes in as a string
-              val actualNewValue = newValue ---
+              // Find the variable and set its value
+              t.findVariableByIndex(frame, offset).flatMap { case v =>
+                // NOTE: Casting only converts to AnyVal or String, so we can
+                //       assume that a successful cast yielded one or the other,
+                //       but this might not be the case in the future
+                val actualNewValue = t.typeInfo.castLocal(newValue) match {
+                  case st: String => s.createRemotely(st)
+                  case av         => s.createRemotely(av.asInstanceOf[AnyVal])
+                }
 
-              t.findVariableByIndex(frame, offset)
-                .flatMap(_.trySetValue(actualNewValue).toOption)
-                .map(_ => TrueResponse)
-                .getOrElse(FalseResponse)
+                v.trySetValueFromInfo(actualNewValue).toOption
+              }.map(_ => TrueResponse).getOrElse(FalseResponse)
             case Failure(_) =>
               log.error(s"Unknown thread $threadId for debug-set-value")
               FalseResponse
@@ -353,5 +398,98 @@ class DebugActor(
 
     // Unrecognized location request, so return nothing
     case _ => None
+  }
+
+  /**
+   * Creates a variety of event listeners that broadcast messages and log
+   * information when those associated events occur.
+   *
+   * @param scalaVirtualMachine The JVM whose events to listen to
+   */
+  private def bindEventHandlers(scalaVirtualMachine: ScalaVirtualMachine): Unit = {
+    // TODO: Provide specific event listeners (versus generic with casting)
+    import com.sun.jdi.event._
+
+    // Breakpoint Event - capture and broadcast breakpoint information
+    scalaVirtualMachine.createEventListener(EventType.BreakpointEventType).foreach(e => {
+      val se = e.asInstanceOf[BreakpointEvent]
+      val l: LocationInfoProfile = scalaVirtualMachine.location(se.location())
+      val t: ThreadInfoProfile = scalaVirtualMachine.thread(se.thread())
+
+      sourceMap.newLineSourcePosition(l) match {
+        case Some(lsp) =>
+          broadcaster ! DebugStepEvent(
+            DebugThreadId(t.uniqueId),
+            t.name,
+            lsp.file,
+            lsp.line
+          )
+        case None =>
+          val sn = l.sourceName
+          val ln = l.lineNumber
+          log.warning(s"Breakpoint position not found: $sn : $ln")
+      }
+    })
+
+    // Step Event - capture and broadcast step information
+    scalaVirtualMachine.createEventListener(EventType.StepEventType).foreach(e => {
+      val se = e.asInstanceOf[StepEvent]
+      val l: LocationInfoProfile = scalaVirtualMachine.location(se.location())
+      val t: ThreadInfoProfile = scalaVirtualMachine.thread(se.thread())
+
+      sourceMap.newLineSourcePosition(l) match {
+        case Some(lsp) =>
+          broadcaster ! DebugStepEvent(
+            DebugThreadId(t.uniqueId),
+            t.name,
+            lsp.file,
+            lsp.line
+          )
+        case None =>
+          val sn = l.sourceName
+          val ln = l.lineNumber
+          log.warning(s"Step position not found: $sn : $ln")
+      }
+    })
+
+    // Exception Event - capture and broadcast exception information
+    scalaVirtualMachine.createEventListener(EventType.ExceptionEventType).foreach(e => {
+      val ee = e.asInstanceOf[ExceptionEvent]
+      val t = scalaVirtualMachine.thread(ee.thread())
+      val ex = scalaVirtualMachine.`object`(t, ee.exception())
+      val lsp = if (ee.catchLocation() != null) {
+        val l: LocationInfoProfile = scalaVirtualMachine.location(ee.catchLocation())
+        sourceMap.newLineSourcePosition(l)
+      } else None
+
+      broadcaster ! DebugExceptionEvent(
+        ex.uniqueId,
+        DebugThreadId(t.uniqueId),
+        t.name,
+        lsp.map(_.file),
+        lsp.map(_.line)
+      )
+    })
+
+    // Thread Start Event - capture and broadcast associated thread
+    scalaVirtualMachine.createEventListener(EventType.ThreadStartEventType).foreach(e => {
+      val tse = e.asInstanceOf[ThreadStartEvent]
+      val t = scalaVirtualMachine.thread(tse.thread())
+      broadcaster ! DebugThreadStartEvent(DebugThreadId(t.uniqueId))
+    })
+
+    // Thread Death Event - capture and broadcast associated thread
+    scalaVirtualMachine.createEventListener(EventType.ThreadDeathEventType).foreach(e => {
+      val tde = e.asInstanceOf[ThreadDeathEvent]
+      val t = scalaVirtualMachine.thread(tde.thread())
+      broadcaster ! DebugThreadDeathEvent(DebugThreadId(t.uniqueId))
+    })
+
+    // Class Prepare Event - log new class name
+    scalaVirtualMachine.createEventListener(EventType.ClassPrepareEventType).foreach(e => {
+      val cpe = e.asInstanceOf[ClassPrepareEvent]
+      // TODO: Add ReferenceType wrapper method
+      log.info(s"ClassPrepareEvent: ${cpe.referenceType().name()}")
+    })
   }
 }

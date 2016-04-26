@@ -158,13 +158,9 @@ class VirtualMachineManager(
   private def bindEvents(s: ScalaVirtualMachine): Unit = {
     import org.scaladebugger.api.dsl.Implicits._
 
-    // Listen for new classes, suspending all JVM threads while trying to add
-    // any associated breakpoints
-    s.onUnsafeClassPrepare(SuspendPolicyProperty.AllThreads).foreach(e => {
-      val refType = e.referenceType()
-      typeAdded(refType)
-      tryPendingBreaksForSourcename(refType.sourceName())
-    })
+    // NOTE: Previously processed pending requests using Ensime, but this is
+    //       now handled underneath by the debugger API
+    //s.onUnsafeClassPrepare(SuspendPolicyProperty.AllThreads)
 
     // Listen for thread start events, but do not suspend any thread
     s.getOrCreateThreadStartRequest(SuspendPolicyProperty.NoThread)
@@ -173,16 +169,17 @@ class VirtualMachineManager(
     s.getOrCreateThreadDeathRequest(SuspendPolicyProperty.NoThread)
 
     // Listen for all uncaught exceptions, suspending the entire JVM when we
-    // encounter an uncaught exception event
+    // encounter an uncaught exception event, and cache the exception
     s.getOrCreateAllExceptionsRequest(
       notifyCaught = false,
       notifyUncaught = true,
       SuspendPolicyProperty.AllThreads
-    ).foreach(_.exception())
+    ).foreach(e => s.`object`(e.thread(), e.exception()).cache())
 
-    // If our VM disconnects, stop the debugger
+    // If our VM disconnects/dies, stop the debugger
     // TODO: This is not wise if we are using a Listening debugger which can have
     //       more than one JVM connected at once
     s.onUnsafeVMDisconnect().foreach(_ => stop())
+    s.onUnsafeVMDeath().foreach(_ => stop())
   }
 }
