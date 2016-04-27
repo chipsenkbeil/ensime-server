@@ -8,6 +8,7 @@ import org.ensime.api._
 import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.lowlevel.breakpoints.{ BreakpointRequestInfo, PendingBreakpointSupportLike }
 import org.scaladebugger.api.lowlevel.events.EventType
+import org.scaladebugger.api.lowlevel.requests.properties.SuspendPolicyProperty
 import org.scaladebugger.api.profiles.traits.info._
 import org.scaladebugger.api.virtualmachines.{ ObjectCache, ScalaVirtualMachine }
 
@@ -44,18 +45,16 @@ class DebugActor private (
   private val sourceMap: SourceMap = new SourceMap(config = config)
   private val converter: StructureConverter = new StructureConverter(sourceMap)
   private val vmm: VirtualMachineManager = new VirtualMachineManager(
-    // Bind our event handlers (breakpoint, step, thread start, etc.) and signal
-    // to the user that the JVM has started
-    globalStartFunc = s => {
-    bindEventHandlers(s)
-
-    broadcaster ! DebugVMStartEvent
-  },
+    globalStartFunc = s => broadcaster ! DebugVMStartEvent,
 
     // Signal to the user that the JVM has disconnected
     // TODO: Move active breakpoints to pending?
     globalStopFunc = s => broadcaster ! DebugVMDisconnectEvent
   )
+
+  // Bind our event handlers (breakpoint, step, thread start, etc.) before the
+  // start of each VM
+  vmm.withDummyVM(bindEventHandlers)
 
   /**
    * Receives user-based events and processes them.
@@ -76,6 +75,7 @@ class DebugActor private (
       // TODO: Error will be a future timeout, need to see if can grab reason
       Try(vmm.start(VmStart(commandLine), options)).failed.foreach(t => {
         log.error(t, "Failure during VM startup")
+        println(t)
         val message = t.toString
         DebugVmError(1, message)
       })
@@ -141,30 +141,29 @@ class DebugActor private (
     // ========================================================================
     case DebugSetBreakReq(file, line: Int) =>
       sender ! withVM(s => {
-        fullFileName(s, file.getName) match {
-          case Some(fileName) =>
-            // TODO: Figure out why location examining needed to compare the
-            //       sourcePath, sourceName, and lineNumber for each location
-            //       pulled from the file's reference types AND its methods, why
-            //       do we need to look up the line that way?
-            // NOTE: If Scala Debugger API needs to change to match the old
-            //       functionality, just need to change the low-level class
-            //       manager's linesAndLocationsForFile method.
-            s.tryGetOrCreateBreakpointRequest(fileName, line) match {
-              case Success(bp) =>
-                val isPending = s.isBreakpointRequestPending(fileName, line)
+        // Retrieve org/path/file.scala from file
+        val fileName = sourceMap.parsePath(file)
 
-                if (!isPending) {
-                  bgMessage(s"Resolved breakpoint at: $fileName : $line")
-                } else {
-                  bgMessage("Location not loaded. Set pending breakpoint.")
-                }
+        // TODO: Figure out why location examining needed to compare the
+        //       sourcePath, sourceName, and lineNumber for each location
+        //       pulled from the file's reference types AND its methods, why
+        //       do we need to look up the line that way?
+        // NOTE: If Scala Debugger API needs to change to match the old
+        //       functionality, just need to change the low-level class
+        //       manager's linesAndLocationsForFile method.
+        s.tryGetOrCreateBreakpointRequest(fileName, line) match {
+          case Success(bp) =>
+            val isPending = s.isBreakpointRequestPending(fileName, line)
 
-                TrueResponse
-              case Failure(ex) =>
-                FalseResponse
+            if (!isPending) {
+              bgMessage(s"Resolved breakpoint at: $fileName : $line")
+            } else {
+              bgMessage("Location not loaded. Set pending breakpoint.")
             }
-          case None => FalseResponse
+
+            TrueResponse
+          case Failure(ex) =>
+            FalseResponse
         }
       })
 
@@ -357,8 +356,7 @@ class DebugActor private (
 
     // Report error information
     result.failed.foreach(e =>
-      log.warning(s"Unable to retrieve thread with id: $threadId", e)
-    )
+      log.warning(s"Unable to retrieve thread with id: $threadId", e))
 
     result.getOrElse(FalseResponse)
   })
@@ -439,6 +437,10 @@ class DebugActor private (
     // TODO: Provide specific event listeners (versus generic with casting)
     import com.sun.jdi.event._
 
+    // Send start event to client when received
+    scalaVirtualMachine.onUnsafeVMStart().foreach(_ =>
+      broadcaster ! DebugVMStartEvent)
+
     // Breakpoint Event - capture and broadcast breakpoint information
     scalaVirtualMachine.createEventListener(EventType.BreakpointEventType).foreach(e => {
       val se = e.asInstanceOf[BreakpointEvent]
@@ -481,7 +483,6 @@ class DebugActor private (
       }
     })
 
-    // Exception Event - capture and broadcast exception information
     scalaVirtualMachine.createEventListener(EventType.ExceptionEventType).foreach(e => {
       val ee = e.asInstanceOf[ExceptionEvent]
       val t = scalaVirtualMachine.thread(ee.thread())
@@ -500,18 +501,43 @@ class DebugActor private (
       )
     })
 
+    // Exception Event - capture and broadcast exception information
+    // Listen for all uncaught exceptions, suspending the entire JVM when we
+    // encounter an uncaught exception event, and cache the exception
+    scalaVirtualMachine.getOrCreateAllExceptionsRequest(
+      notifyCaught = false,
+      notifyUncaught = true,
+      SuspendPolicyProperty.AllThreads
+    ).foreach(e => {
+      // Cache the exception object
+      scalaVirtualMachine.`object`(e.thread(), e.exception()).cache()
+
+      val t = scalaVirtualMachine.thread(e.thread())
+      val ex = scalaVirtualMachine.`object`(t, e.exception())
+      val lsp = if (e.catchLocation() != null) {
+        val l: LocationInfoProfile = scalaVirtualMachine.location(e.catchLocation())
+        sourceMap.newLineSourcePosition(l)
+      } else None
+
+      broadcaster ! DebugExceptionEvent(
+        ex.uniqueId,
+        DebugThreadId(t.uniqueId),
+        t.name,
+        lsp.map(_.file),
+        lsp.map(_.line)
+      )
+    })
+
     // Thread Start Event - capture and broadcast associated thread
-    scalaVirtualMachine.createEventListener(EventType.ThreadStartEventType).foreach(e => {
-      val tse = e.asInstanceOf[ThreadStartEvent]
-      val t = scalaVirtualMachine.thread(tse.thread())
-      broadcaster ! DebugThreadStartEvent(DebugThreadId(t.uniqueId))
+    scalaVirtualMachine.onUnsafeThreadStart(SuspendPolicyProperty.NoThread).foreach(t => {
+      val ti = scalaVirtualMachine.thread(t.thread())
+      broadcaster ! DebugThreadStartEvent(DebugThreadId(ti.uniqueId))
     })
 
     // Thread Death Event - capture and broadcast associated thread
-    scalaVirtualMachine.createEventListener(EventType.ThreadDeathEventType).foreach(e => {
-      val tde = e.asInstanceOf[ThreadDeathEvent]
-      val t = scalaVirtualMachine.thread(tde.thread())
-      broadcaster ! DebugThreadDeathEvent(DebugThreadId(t.uniqueId))
+    scalaVirtualMachine.onUnsafeThreadDeath(SuspendPolicyProperty.NoThread).foreach(t => {
+      val ti = scalaVirtualMachine.thread(t.thread())
+      broadcaster ! DebugThreadDeathEvent(DebugThreadId(ti.uniqueId))
     })
 
     // Class Prepare Event - log new class name

@@ -24,6 +24,8 @@ class SourceMap(private val config: EnsimeConfig) {
   private val logger = LoggerFactory.getLogger(this.getClass)
 
   /** Represents internal storage of local source files. */
+  private lazy val roots: Seq[String] =
+    config.compileClasspath.map(_.getCanonicalPath).toSeq
   private lazy val sources: Set[File] = config.scalaSourceFiles.map(_.canon)
   private lazy val sourceMap: Map[String, Set[File]] = sources.groupBy(_.getName)
 
@@ -97,4 +99,37 @@ class SourceMap(private val config: EnsimeConfig) {
    * @return The set of Scala source files
    */
   def canonicalSources: Set[File] = sources
+
+  /**
+   * Parses the canonical path of the provided file, removing the root path
+   * and leaving the relative source path for use by breakpoints.
+   *
+   * @param file The file whose path to parse
+   * @return The relative source path
+   */
+  def parsePath(file: File): String = {
+    parsePath(file.getCanonicalPath)
+  }
+
+  /**
+   * Parses the file path, removing the root path and leaving the relative
+   * source path for use by breakpoints.
+   *
+   * @param filePath The absolute file path
+   * @return The relative source path
+   */
+  def parsePath(filePath: String): String = {
+    parsePath(roots, filePath)
+  }
+
+  /**
+   * Parses a source path, removing the matching root path from the source path.
+   * @param rootPaths The root paths to remove from the source path
+   * @param sourcePath The source path to strip of the root path
+   * @return The stripped source path
+   */
+  private def parsePath(rootPaths: Seq[String], sourcePath: String): String = {
+    rootPaths.find(sourcePath.startsWith).map(p => sourcePath.replace(p, ""))
+      .getOrElse(sourcePath)
+  }
 }
