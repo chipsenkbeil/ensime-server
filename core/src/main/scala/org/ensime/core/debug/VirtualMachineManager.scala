@@ -1,12 +1,12 @@
 package org.ensime.core.debug
 
 import com.sun.jdi.VMDisconnectedException
-import org.scaladebugger.api.debuggers.{LaunchingDebugger, AttachingDebugger, Debugger}
+import org.scaladebugger.api.debuggers.{ AttachingDebugger, Debugger, LaunchingDebugger }
 import org.scaladebugger.api.lowlevel.requests.properties.SuspendPolicyProperty
-import org.scaladebugger.api.virtualmachines.ScalaVirtualMachine
+import org.scaladebugger.api.virtualmachines.{ DummyScalaVirtualMachine, ScalaVirtualMachine }
 import org.slf4j.LoggerFactory
 
-import scala.util.{Failure, Try}
+import scala.util.{ Failure, Try }
 
 /**
  * Represents a manager of virtual machines connected to Ensime.
@@ -16,10 +16,12 @@ import scala.util.{Failure, Try}
  *                 unexpectedly
  */
 class VirtualMachineManager(
-  private val globalStartFunc: (ScalaVirtualMachine) => Unit = _ => {},
-  private val globalStopFunc: (ScalaVirtualMachine) => Unit = _ => {}
+    private val globalStartFunc: (ScalaVirtualMachine) => Unit = _ => {},
+    private val globalStopFunc: (ScalaVirtualMachine) => Unit = _ => {}
 ) {
   private val log = LoggerFactory.getLogger(this.getClass)
+  private lazy val dummyScalaVirtualMachine: ScalaVirtualMachine =
+    DummyScalaVirtualMachine.newInstance()
   @volatile private var debugger: Option[Debugger] = None
   @volatile private var vm: Option[ScalaVirtualMachine] = None
   @volatile private var mode: Option[VmMode] = None
@@ -56,7 +58,7 @@ class VirtualMachineManager(
           className = commandLine,
           jvmOptions = options,
           suspend = true
-        )
+        ).withPending(dummyScalaVirtualMachine)
 
         val s = d.start(timeout = 10.seconds, startProcessingEvents = false)
 
@@ -66,7 +68,7 @@ class VirtualMachineManager(
         val d = AttachingDebugger(
           port = port.toInt,
           hostname = hostname
-        )
+        ).withPending(dummyScalaVirtualMachine)
 
         val s = d.start(timeout = 10.seconds, startProcessingEvents = false)
 
@@ -149,6 +151,23 @@ class VirtualMachineManager(
 
     result
   }
+
+  /**
+   * Retrieves the dummy JVM and runs the specified action on top of it.
+   *
+   * @param action The action to evaluate on top of the dummy JVM
+   * @tparam T The expected return value from the action
+   * @return Some containing the result if successful, otherwise None
+   */
+  def withDummyVM[T](action: (ScalaVirtualMachine => T)): Try[T] =
+    dummyScalaVirtualMachine.synchronized {
+      val result = Try(action(dummyScalaVirtualMachine))
+
+      result.failed.foreach(e =>
+        log.error("Exception thrown whilst handling dummy vm action", e))
+
+      result
+    }
 
   /**
    * Attaches common event handlers to the virtual machine.

@@ -20,12 +20,12 @@ class StructureConverter(private val sourceMap: SourceMap) {
    * @return The Ensime message
    */
   def makeDebugValue(valueInfo: ValueInfoProfile): DebugValue = valueInfo match {
-    case v if v.isNull                      => makeDebugNull()
-    case v if v.isVoid                      => makeDebugVoid(v)
-    case v: ArrayInfoProfile                => makeDebugArr(v)
+    case v if v.isNull => makeDebugNull()
+    case v if v.isVoid => makeDebugVoid(v)
+    case v: ArrayInfoProfile => makeDebugArr(v)
     case v: ObjectInfoProfile if v.isString => makeDebugStr(v)
-    case v: ObjectInfoProfile               => makeDebugObj(v)
-    case v: PrimitiveInfoProfile            => makeDebugPrim(v)
+    case v: ObjectInfoProfile => makeDebugObj(v)
+    case v: PrimitiveInfoProfile => makeDebugPrim(v)
   }
 
   def makeDebugObj(value: ObjectInfoProfile): DebugObjectInstance = {

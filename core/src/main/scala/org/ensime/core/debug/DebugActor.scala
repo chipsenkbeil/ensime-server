@@ -2,16 +2,32 @@ package org.ensime.core.debug
 
 import java.io.File
 
-import akka.actor.{Actor, ActorLogging, ActorRef}
+import akka.actor.{ Actor, ActorLogging, ActorRef, Props }
 import akka.event.LoggingReceive
 import org.ensime.api._
 import org.scaladebugger.api.dsl.Implicits._
-import org.scaladebugger.api.lowlevel.breakpoints.{BreakpointRequestInfo, PendingBreakpointSupportLike}
+import org.scaladebugger.api.lowlevel.breakpoints.{ BreakpointRequestInfo, PendingBreakpointSupportLike }
 import org.scaladebugger.api.lowlevel.events.EventType
 import org.scaladebugger.api.profiles.traits.info._
-import org.scaladebugger.api.virtualmachines.{ObjectCache, ScalaVirtualMachine}
+import org.scaladebugger.api.virtualmachines.{ ObjectCache, ScalaVirtualMachine }
 
-import scala.util.{Failure, Success, Try}
+import scala.util.{ Failure, Success, Try }
+
+/**
+ * Contains helper methods to initialize the DebugActor class.
+ */
+object DebugActor {
+  /**
+   * Creates a new instance of the Akka props for the DebugActor class.
+   *
+   * @param broadcaster The actor reference to serve as the broadcaster of
+   *                    messages to the client
+   * @param config The Ensime configuration used for source file lookup
+   * @return The new Akka props instance
+   */
+  def props(broadcaster: ActorRef)(implicit config: EnsimeConfig): Props =
+    Props(new DebugActor(broadcaster, config))
+}
 
 /**
  * Represents the main entrypoint into the debugging interface of Ensime.
@@ -21,9 +37,9 @@ import scala.util.{Failure, Success, Try}
  * @param config The Ensime-specific configuration to associate with the
  *               debugger
  */
-class DebugActor(
-  private val broadcaster: ActorRef,
-  private val config: EnsimeConfig
+class DebugActor private (
+    private val broadcaster: ActorRef,
+    private val config: EnsimeConfig
 ) extends Actor with ActorLogging {
   private val sourceMap: SourceMap = new SourceMap(config = config)
   private val converter: StructureConverter = new StructureConverter(sourceMap)
@@ -31,10 +47,10 @@ class DebugActor(
     // Bind our event handlers (breakpoint, step, thread start, etc.) and signal
     // to the user that the JVM has started
     globalStartFunc = s => {
-      bindEventHandlers(s)
+    bindEventHandlers(s)
 
-      broadcaster ! DebugVMStartEvent
-    },
+    broadcaster ! DebugVMStartEvent
+  },
 
     // Signal to the user that the JVM has disconnected
     // TODO: Move active breakpoints to pending?
@@ -115,10 +131,11 @@ class DebugActor(
 
     // ========================================================================
     case DebugContinueReq(threadId) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        // TODO: Why is this resuming the entire VM instead of the single thread?
-        s.underlyingVirtualMachine.resume()
-        TrueResponse
+      sender ! withThread(threadId.id, {
+        case (s, t) =>
+          // TODO: Why is this resuming the entire VM instead of the single thread?
+          s.underlyingVirtualMachine.resume()
+          TrueResponse
       })
 
     // ========================================================================
@@ -172,72 +189,77 @@ class DebugActor(
         val bps = s.breakpointRequests
 
         (bps.filterNot(_.isPending), bps.filter(_.isPending))
-      }).map { case (a, p) =>
+      }).map {
+        case (a, p) =>
 
-        /** Convert collection of BreakpointRequestInfo to Ensime Breakpoint */
-        def convert(b: Seq[BreakpointRequestInfo]) = b.map(b2 =>
-          (sourceMap.sourceForFilePath(b2.fileName), b2.lineNumber)
-        ).filter(_._1.nonEmpty).map(t => Breakpoint(t._1.get, t._2))
+          /** Convert collection of BreakpointRequestInfo to Ensime Breakpoint */
+          def convert(b: Seq[BreakpointRequestInfo]) = b.map(b2 =>
+            (sourceMap.sourceForFilePath(b2.fileName), b2.lineNumber)).filter(_._1.nonEmpty).map(t => Breakpoint(t._1.get, t._2))
 
-        (convert(a).toList, convert(p).toList)
+          (convert(a).toList, convert(p).toList)
       }.getOrElse((Nil, Nil))
 
       sender ! BreakpointList(activeBreakpoints, pendingBreakpoints)
 
     // ========================================================================
     case DebugNextReq(threadId: DebugThreadId) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        s.stepOverLine(t)
-        TrueResponse
+      sender ! withThread(threadId.id, {
+        case (s, t) =>
+          s.stepOverLine(t)
+          TrueResponse
       })
 
     // ========================================================================
     case DebugStepReq(threadId: DebugThreadId) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        s.stepIntoLine(t)
-        TrueResponse
+      sender ! withThread(threadId.id, {
+        case (s, t) =>
+          s.stepIntoLine(t)
+          TrueResponse
       })
 
     // ========================================================================
     case DebugStepOutReq(threadId: DebugThreadId) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        s.stepOutLine(t)
-        TrueResponse
+      sender ! withThread(threadId.id, {
+        case (s, t) =>
+          s.stepOutLine(t)
+          TrueResponse
       })
 
     // ========================================================================
     case DebugLocateNameReq(threadId: DebugThreadId, name: String) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        if (name == "this") {
-          t.tryTopFrame.flatMap(_.tryThisObject).map {
-            case objectReference =>
-              DebugObjectReference(objectReference.cache().uniqueId)
-          }.getOrElse(FalseResponse)
-        } else {
-          t.findVariableByName(name).flatMap {
-            case v: IndexedVariableInfoProfile =>
-              Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
-            case v if v.isField => v.toValue match {
-              case o: ObjectInfoProfile =>
-                Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), v.name))
-              case _ =>
-                None
-            }
-          }.getOrElse(FalseResponse)
-        }
+      sender ! withThread(threadId.id, {
+        case (s, t) =>
+          if (name == "this") {
+            t.tryTopFrame.flatMap(_.tryThisObject).map {
+              case objectReference =>
+                DebugObjectReference(objectReference.cache().uniqueId)
+            }.getOrElse(FalseResponse)
+          } else {
+            t.findVariableByName(name).flatMap {
+              case v: IndexedVariableInfoProfile =>
+                Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
+              case v if v.isField => v.toValue match {
+                case o: ObjectInfoProfile =>
+                  Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), v.name))
+                case _ =>
+                  None
+              }
+            }.getOrElse(FalseResponse)
+          }
       })
 
     // ========================================================================
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
-      sender ! withThread(threadId.id, { case (s, t) =>
-        val frames = t.frames(index, count)
+      sender ! withThread(threadId.id, {
+        case (s, t) =>
+          val frames = t.frames(index, count)
 
-        // Cache each stack frame's "this" reference
-        frames.foreach(_.thisObject.cache())
+          // Cache each stack frame's "this" reference
+          frames.foreach(_.thisObject.cache())
 
-        val ensimeFrames = frames.map(converter.makeStackFrame)
+          val ensimeFrames = frames.map(converter.makeStackFrame)
 
-        DebugBacktrace(ensimeFrames.toList, DebugThreadId(t.uniqueId), t.name)
+          DebugBacktrace(ensimeFrames.toList, DebugThreadId(t.uniqueId), t.name)
       })
 
     // ========================================================================
@@ -245,8 +267,7 @@ class DebugActor(
       sender ! withVM(s =>
         lookupValue(s.cache, location)
           .map(converter.makeDebugValue)
-          .getOrElse(FalseResponse)
-      )
+          .getOrElse(FalseResponse))
 
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
@@ -255,8 +276,7 @@ class DebugActor(
         lookupValue(s.cache, location)
           .map(_.toPrettyString)
           .map(StringResponse(_))
-          .getOrElse(FalseResponse)
-      )
+          .getOrElse(FalseResponse))
 
     // ========================================================================
     case DebugSetValueReq(location, newValue) =>
@@ -265,16 +285,17 @@ class DebugActor(
           case DebugStackSlot(threadId, frame, offset) => s.tryThread(threadId.id) match {
             case Success(t) =>
               // Find the variable and set its value
-              t.findVariableByIndex(frame, offset).flatMap { case v =>
-                // NOTE: Casting only converts to AnyVal or String, so we can
-                //       assume that a successful cast yielded one or the other,
-                //       but this might not be the case in the future
-                val actualNewValue = t.typeInfo.castLocal(newValue) match {
-                  case st: String => s.createRemotely(st)
-                  case av         => s.createRemotely(av.asInstanceOf[AnyVal])
-                }
+              t.findVariableByIndex(frame, offset).flatMap {
+                case v =>
+                  // NOTE: Casting only converts to AnyVal or String, so we can
+                  //       assume that a successful cast yielded one or the other,
+                  //       but this might not be the case in the future
+                  val actualNewValue = t.typeInfo.castLocal(newValue) match {
+                    case st: String => s.createRemotely(st)
+                    case av => s.createRemotely(av.asInstanceOf[AnyVal])
+                  }
 
-                v.trySetValueFromInfo(actualNewValue).toOption
+                  v.trySetValueFromInfo(actualNewValue).toOption
               }.map(_ => TrueResponse).getOrElse(FalseResponse)
             case Failure(_) =>
               log.error(s"Unknown thread $threadId for debug-set-value")
@@ -299,7 +320,9 @@ class DebugActor(
   }
 
   /**
-   * Attempts to invoke the provided action against the active VM.
+   * Attempts to invoke the provided action against the active VM. If no active
+   * VM is available, falls back to invoking the action against a dummy VM that
+   * will be applied to the active VM when started.
    *
    * @param action The action to execute against the virtual machine
    * @tparam T The type of RpcResponse to return from the invocation
@@ -308,11 +331,14 @@ class DebugActor(
    */
   private def withVM[T <: RpcResponse](
     action: ScalaVirtualMachine => T
-  ): RpcResponse = vmm.withVM(action).getOrElse({
-    // TODO: Log more information based on type of error
-    log.warning("Could not access debug VM.")
-    FalseResponse
-  })
+  ): RpcResponse = {
+    val result = vmm.withVM(action).orElse(vmm.withDummyVM(action))
+
+    // Report error information
+    result.failed.foreach(e => log.warning("Failed to process VM action", e))
+
+    result.getOrElse(FalseResponse)
+  }
 
   /**
    * Attempts to invoke the provided action against the specified thread.
@@ -327,11 +353,14 @@ class DebugActor(
     threadId: Long,
     action: (ScalaVirtualMachine, ThreadInfoProfile) => T
   ): RpcResponse = withVM(s => {
-    s.tryThread(threadId).flatMap(t => Try(action(s, t))).getOrElse({
-      // TODO: Log more information based on type of error
-      log.warning(s"Unable to retrieve thread with id: $threadId")
-      FalseResponse
-    })
+    val result = s.tryThread(threadId).flatMap(t => Try(action(s, t)))
+
+    // Report error information
+    result.failed.foreach(e =>
+      log.warning(s"Unable to retrieve thread with id: $threadId", e)
+    )
+
+    result.getOrElse(FalseResponse)
   })
 
   /**

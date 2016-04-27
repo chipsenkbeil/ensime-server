@@ -5,7 +5,7 @@ package org.ensime.core.debug
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
-import org.ensime.api.{EnsimeConfig, LineSourcePosition}
+import org.ensime.api.{ EnsimeConfig, LineSourcePosition }
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
@@ -45,8 +45,7 @@ class SourceMap(private val config: EnsimeConfig) {
     location: LocationInfoProfile
   ): Option[LineSourcePosition] = {
     findFileByLocation(location).map(f =>
-      LineSourcePosition(f, location.lineNumber)
-    )
+      LineSourcePosition(f, location.lineNumber))
   }
 
   /**
