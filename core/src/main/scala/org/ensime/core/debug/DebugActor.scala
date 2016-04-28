@@ -45,8 +45,6 @@ class DebugActor private (
   private val sourceMap: SourceMap = new SourceMap(config = config)
   private val converter: StructureConverter = new StructureConverter(sourceMap)
   private val vmm: VirtualMachineManager = new VirtualMachineManager(
-    globalStartFunc = s => broadcaster ! DebugVMStartEvent,
-
     // Signal to the user that the JVM has disconnected
     // TODO: Move active breakpoints to pending?
     globalStopFunc = s => broadcaster ! DebugVMDisconnectEvent
@@ -251,13 +249,17 @@ class DebugActor private (
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! withThread(threadId.id, {
         case (s, t) =>
+          println("TEST 1")
           val frames = t.frames(index, count)
 
           // Cache each stack frame's "this" reference
+          println("TEST 2")
           frames.foreach(_.thisObject.cache())
 
+          println("TEST 3")
           val ensimeFrames = frames.map(converter.makeStackFrame)
 
+          println("TEST 4")
           DebugBacktrace(ensimeFrames.toList, DebugThreadId(t.uniqueId), t.name)
       })
 
@@ -352,11 +354,18 @@ class DebugActor private (
     threadId: Long,
     action: (ScalaVirtualMachine, ThreadInfoProfile) => T
   ): RpcResponse = withVM(s => {
-    val result = s.tryThread(threadId).flatMap(t => Try(action(s, t)))
+    val result = s.tryThread(threadId).flatMap(t => {
+      Try(t.toJdiInstance.suspend())
+      val result = Try(action(s, t))
+      Try(t.toJdiInstance.resume())
+      result
+    })
 
     // Report error information
-    result.failed.foreach(e =>
-      log.warning(s"Unable to retrieve thread with id: $threadId", e))
+    result.failed.foreach(e => {
+      println("ERROR: " + e + "\n" + e.getStackTrace.mkString("\n"))
+      log.warning(s"Unable to retrieve thread with id: $threadId", e)
+    })
 
     result.getOrElse(FalseResponse)
   })
@@ -449,7 +458,7 @@ class DebugActor private (
 
       sourceMap.newLineSourcePosition(l) match {
         case Some(lsp) =>
-          broadcaster ! DebugStepEvent(
+          broadcaster ! DebugBreakEvent(
             DebugThreadId(t.uniqueId),
             t.name,
             lsp.file,

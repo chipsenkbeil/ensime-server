@@ -24,8 +24,11 @@ class SourceMap(private val config: EnsimeConfig) {
   private val logger = LoggerFactory.getLogger(this.getClass)
 
   /** Represents internal storage of local source files. */
-  private lazy val roots: Seq[String] =
-    config.compileClasspath.map(_.getCanonicalPath).toSeq
+  private lazy val roots: Seq[String] = (
+    config.compileClasspath.map(_.getCanonicalPath).toSeq ++
+    config.referenceSourceRoots.map(_.getCanonicalPath) ++
+    config.subprojects.flatMap(_.sourceRoots).map(_.getCanonicalPath)
+  ).distinct
   private lazy val sources: Set[File] = config.scalaSourceFiles.map(_.canon)
   private lazy val sourceMap: Map[String, Set[File]] = sources.groupBy(_.getName)
 
@@ -130,6 +133,6 @@ class SourceMap(private val config: EnsimeConfig) {
    */
   private def parsePath(rootPaths: Seq[String], sourcePath: String): String = {
     rootPaths.find(sourcePath.startsWith).map(p => sourcePath.replace(p, ""))
-      .getOrElse(sourcePath)
+      .getOrElse(sourcePath).stripPrefix("/")
   }
 }

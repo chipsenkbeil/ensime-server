@@ -108,11 +108,16 @@ class VirtualMachineManager(
     withVM(globalStopFunc)
     withVM(stopFunc)
 
+    clear()
+  }
+
+  /** Clears the active mode, vm, and debugger. */
+  private def clear(): Unit = synchronized {
     // Clear our associated mode
     mode = None
 
     // Dispose of the virtual machine and discard the reference
-    withVM(_.underlyingVirtualMachine.dispose())
+    Try(vm.foreach(_.underlyingVirtualMachine.dispose()))
     vm = None
 
     // Shutdown the associated debugger
@@ -147,7 +152,7 @@ class VirtualMachineManager(
     result.failed.foreach {
       case e: VMDisconnectedException =>
         log.error("Attempted interaction with disconnected VM:", e)
-        stop()
+        clear()
       case e: Throwable =>
         log.error("Exception thrown whilst handling vm action", e)
     }
