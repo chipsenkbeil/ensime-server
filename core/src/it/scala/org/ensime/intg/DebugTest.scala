@@ -220,7 +220,7 @@ class DebugTest extends EnsimeSpec
             inside(getVariableValue(DebugThreadId(1), "h")) {
               case DebugStringInstance("\"test\"", debugFields, "java.lang.String", _) =>
                 exactly(1, debugFields) should matchPattern {
-                  case DebugClassField(_, "value", "char[]", "Array['t', 'e', 's',...]") =>
+                  case DebugClassField(_, "value", "char[]", "Array(length = 4)['t','e','s',...]") =>
                 }
             }
 
@@ -231,9 +231,13 @@ class DebugTest extends EnsimeSpec
 
             // type local
             inside(getVariableValue(DebugThreadId(1), "j")) {
-              case DebugObjectInstance("Instance of $colon$colon", debugFields, "scala.collection.immutable.$colon$colon", _) =>
+              case DebugObjectInstance(summary, debugFields, "scala.collection.immutable.$colon$colon", _) =>
+                summary should startWith("Instance of scala.collection.immutable.$colon$colon")
                 exactly(1, debugFields) should matchPattern {
-                  case DebugClassField(_, head, "java.lang.Object", "Instance of Integer") if head == "head" | head == "scala$collection$immutable$$colon$colon$$hd" =>
+                  case DebugClassField(_, head, "java.lang.Object", summary) if (
+                    (head == "head" || head == "scala$collection$immutable$$colon$colon$$hd") &&
+                    summary.startsWith("Instance of java.lang.Integer")
+                  ) =>
                 }
             }
 

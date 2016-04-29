@@ -20,22 +20,13 @@ class StructureConverter(private val sourceMap: SourceMap) {
    * @return The Ensime message
    */
   def makeDebugValue(valueInfo: ValueInfoProfile): DebugValue = {
-    println("Making value for " + valueInfo.toPrettyString)
-    println("Null = " + valueInfo.isNull)
-    println("Void = " + valueInfo.isVoid)
-    println("Array = " + valueInfo.isArray)
-    println("String = " + valueInfo.isString)
-    println("Object = " + valueInfo.isObject)
-    println("Primitive = " + valueInfo.isPrimitive)
-    if (valueInfo.isString) println("Value: " + scala.util.Try(valueInfo.toObject))
-    println("----")
     valueInfo match {
       case v if v.isNull => makeDebugNull()
       case v if v.isVoid => makeDebugVoid(v)
-      case v if v.isArray => makeDebugArr(v.toArray)
-      case v if v.isString => makeDebugStr(v.toObject)
-      case v if v.isObject => makeDebugObj(v.toObject)
-      case v if v.isPrimitive => makeDebugPrim(v.toPrimitive)
+      case v if v.isArray => makeDebugArr(v.toArrayInfo)
+      case v if v.isString => makeDebugStr(v.toStringInfo)
+      case v if v.isObject => makeDebugObj(v.toObjectInfo)
+      case v if v.isPrimitive => makeDebugPrim(v.toPrimitiveInfo)
     }
   }
 
@@ -48,9 +39,9 @@ class StructureConverter(private val sourceMap: SourceMap) {
     )
   }
 
-  def makeDebugStr(value: ObjectInfoProfile): DebugStringInstance = {
+  def makeDebugStr(value: StringInfoProfile): DebugStringInstance = {
     DebugStringInstance(
-      value.toLocalValue.asInstanceOf[String],
+      value.toPrettyString,
       makeFields(value.referenceType, value),
       value.referenceType.name,
       DebugObjectId(value.uniqueId)
@@ -98,7 +89,12 @@ class StructureConverter(private val sourceMap: SourceMap) {
           f.offsetIndex,
           f.name,
           f.typeName,
-          f.tryToValue.map(_.toPrettyString).getOrElse("???")
+
+          // NOTE: Try to get static fields (from reference type) and instance
+          //       fields (from object instance)
+          f.tryToValueInfo.orElse(
+            obj.tryField(f.name).flatMap(_.tryToValueInfo)
+          ).map(_.toPrettyString).getOrElse("???")
         ))).getOrElse(Nil).toList ++ fields
 
       tpe = tpe.flatMap(_.superclassOption)
@@ -131,7 +127,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
     DebugStackLocal(
       variableInfo.offsetIndex,
       variableInfo.name,
-      variableInfo.toValue.toPrettyString,
+      variableInfo.toValueInfo.toPrettyString,
       variableInfo.typeName
     )
   }

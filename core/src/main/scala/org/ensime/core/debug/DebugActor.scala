@@ -237,9 +237,10 @@ class DebugActor private (
             t.findVariableByName(name).flatMap {
               case v: IndexedVariableInfoProfile =>
                 Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
-              case v if v.isField => v.toValue match {
-                case o: ObjectInfoProfile =>
-                  Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), v.name))
+              case v if v.isField => v.toValueInfo match {
+                case o if o.isObject =>
+                  val oo = o.toObjectInfo
+                  Some(DebugObjectField(DebugObjectId(oo.cache().uniqueId), v.name))
                 case _ =>
                   None
               }
@@ -265,9 +266,7 @@ class DebugActor private (
     case DebugValueReq(location) =>
       sender ! withVM(s =>
         lookupValue(s.cache, location)
-          .map(a => { println("HERE 1: " + a); a })
           .map(converter.makeDebugValue)
-          .map(a => { println("HERE 2: " + a); a })
           .getOrElse(FalseResponse))
 
     // ========================================================================
@@ -426,7 +425,7 @@ class DebugActor private (
     case DebugObjectField(objectId, fieldName) =>
       objectCache.load(objectId.id)
         .map(_.field(fieldName))
-        .map(_.toValue.cache())
+        .map(_.toValueInfo.cache())
 
     // Uses cached object with id as array to find element
     // Caches retrieved element object
@@ -441,7 +440,7 @@ class DebugActor private (
       objectCache.load(threadId.id).flatMap {
         case t: ThreadInfoProfile => Some(t)
         case _ => None
-      }.flatMap(_.findVariableByIndex(frame, offset)).map(_.toValue.cache())
+      }.flatMap(_.findVariableByIndex(frame, offset)).map(_.toValueInfo.cache())
 
     // Unrecognized location request, so return nothing
     case _ => None
