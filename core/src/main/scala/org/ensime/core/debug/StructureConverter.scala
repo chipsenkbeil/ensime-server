@@ -19,13 +19,24 @@ class StructureConverter(private val sourceMap: SourceMap) {
    * @param valueInfo The debugger API value
    * @return The Ensime message
    */
-  def makeDebugValue(valueInfo: ValueInfoProfile): DebugValue = valueInfo match {
-    case v if v.isNull => makeDebugNull()
-    case v if v.isVoid => makeDebugVoid(v)
-    case v: ArrayInfoProfile => makeDebugArr(v)
-    case v: ObjectInfoProfile if v.isString => makeDebugStr(v)
-    case v: ObjectInfoProfile => makeDebugObj(v)
-    case v: PrimitiveInfoProfile => makeDebugPrim(v)
+  def makeDebugValue(valueInfo: ValueInfoProfile): DebugValue = {
+    println("Making value for " + valueInfo.toPrettyString)
+    println("Null = " + valueInfo.isNull)
+    println("Void = " + valueInfo.isVoid)
+    println("Array = " + valueInfo.isArray)
+    println("String = " + valueInfo.isString)
+    println("Object = " + valueInfo.isObject)
+    println("Primitive = " + valueInfo.isPrimitive)
+    if (valueInfo.isString) println("Value: " + scala.util.Try(valueInfo.toObject))
+    println("----")
+    valueInfo match {
+      case v if v.isNull => makeDebugNull()
+      case v if v.isVoid => makeDebugVoid(v)
+      case v if v.isArray => makeDebugArr(v.toArray)
+      case v if v.isString => makeDebugStr(v.toObject)
+      case v if v.isObject => makeDebugObj(v.toObject)
+      case v if v.isPrimitive => makeDebugPrim(v.toPrimitive)
+    }
   }
 
   def makeDebugObj(value: ObjectInfoProfile): DebugObjectInstance = {
@@ -39,7 +50,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
 
   def makeDebugStr(value: ObjectInfoProfile): DebugStringInstance = {
     DebugStringInstance(
-      value.toPrettyString,
+      value.toLocalValue.asInstanceOf[String],
       makeFields(value.referenceType, value),
       value.referenceType.name,
       DebugObjectId(value.uniqueId)
@@ -55,10 +66,12 @@ class StructureConverter(private val sourceMap: SourceMap) {
     )
   }
 
-  def makeDebugPrim(value: PrimitiveInfoProfile): DebugPrimitiveValue = DebugPrimitiveValue(
-    value.toPrettyString,
-    value.typeInfo.name
-  )
+  def makeDebugPrim(value: PrimitiveInfoProfile): DebugPrimitiveValue = {
+    DebugPrimitiveValue(
+      value.toPrettyString,
+      value.typeInfo.name
+    )
+  }
 
   def makeDebugVoid(value: ValueInfoProfile): DebugPrimitiveValue = {
     DebugPrimitiveValue(
@@ -67,7 +80,9 @@ class StructureConverter(private val sourceMap: SourceMap) {
     )
   }
 
-  def makeDebugNull(): DebugNullValue = DebugNullValue("Null")
+  def makeDebugNull(): DebugNullValue = {
+    DebugNullValue("Null")
+  }
 
   def makeFields(
     tpeIn: ReferenceTypeInfoProfile,
@@ -78,24 +93,22 @@ class StructureConverter(private val sourceMap: SourceMap) {
     var fields = List[DebugClassField]()
     var tpe: Option[ClassTypeInfoProfile] = Some(tpeIn.toClassType)
     while (tpe.nonEmpty) {
-      var i = -1
-      fields = tpe.get.allFields.map { f =>
-        i += 1
-        DebugClassField(
-          i, f.name,
+      fields = tpe.map(_.indexedVisibleFields)
+        .map(s => s.map(f => DebugClassField(
+          f.offsetIndex,
+          f.name,
           f.typeName,
-          f.toValue.toPrettyString
-        )
-      }.toList ++ fields
+          f.tryToValue.map(_.toPrettyString).getOrElse("???")
+        ))).getOrElse(Nil).toList ++ fields
 
-      tpe = tpe.get.superclass
+      tpe = tpe.flatMap(_.superclassOption)
     }
     fields
   }
 
   def makeStackFrame(frame: FrameInfoProfile): DebugStackFrame = {
     val locals = ignoreErr(
-      frame.localVariables.map(makeStackLocal).toList,
+      frame.indexedLocalVariables.map(makeStackLocal).toList,
       List.empty
     )
 

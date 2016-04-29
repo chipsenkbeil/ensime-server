@@ -61,13 +61,15 @@ class DebugTest extends EnsimeSpec
             import testkit._
             val breakpointsPath = breakpointsFile.getAbsolutePath
 
+            // NOTE: Can encounter scala/Predef.scala if picking stack trace
+            //       at arbitrary point
             project ! DebugBacktraceReq(DebugThreadId(1), 0, 3)
             expectMsgType[DebugBacktrace] should matchPattern {
               case DebugBacktrace(List(
                 DebugStackFrame(0, List(), 0, "breakpoints.Breakpoints", "mainTest",
                   LineSourcePosition(`breakpointsFile`, 32), _),
                 DebugStackFrame(1, List(
-                  DebugStackLocal(0, "args", "Array[]", "java.lang.String[]")
+                  DebugStackLocal(0, "args", "Array(length = 0)[<EMPTY>]", "java.lang.String[]")
                   ), 1, "breakpoints.Breakpoints$", "main",
                   LineSourcePosition(`breakpointsFile`, 41), _),
                 DebugStackFrame(2, List(), 1, "breakpoints.Breakpoints", "main",
@@ -75,75 +77,47 @@ class DebugTest extends EnsimeSpec
                 ), DebugThreadId(1), "main") =>
             }
 
-            //            val bp11 = session.addLineBreakpoint(BP_TYPENAME, 11)
             project ! DebugSetBreakReq(breakpointsFile, 11)
             expectMsg(TrueResponse)
-            //            val bp13 = session.addLineBreakpoint(BP_TYPENAME, 13)
+
+            project ! DebugSetBreakReq(breakpointsFile, 11)
             project ! DebugSetBreakReq(breakpointsFile, 13)
             expectMsg(TrueResponse)
-
-            //              session.waitForBreakpointsToBeEnabled(bp11, bp13)
-
-            //              session.resumetoSuspension()
-            //              session.checkStackFrame(BP_TYPENAME, "simple1()V", 11)
-
-            asyncHelper.expectMsg(DebugBreakEvent(DebugThreadId(1), "main", breakpointsFile, 32))
 
             project ! DebugContinueReq(DebugThreadId(1))
             expectMsg(TrueResponse)
 
             asyncHelper.expectMsg(DebugBreakEvent(DebugThreadId(1), "main", breakpointsFile, 11))
 
-            //              session.resumetoSuspension()
-            //              session.checkStackFrame(BP_TYPENAME, "simple1()V", 13)
-
             project ! DebugContinueReq(DebugThreadId(1))
             expectMsg(TrueResponse)
 
             asyncHelper.expectMsg(DebugBreakEvent(DebugThreadId(1), "main", breakpointsFile, 13))
 
-            //              bp11.setEnabled(false)
             project ! DebugClearBreakReq(breakpointsFile, 11)
             expectMsg(TrueResponse)
 
-            //              session.waitForBreakpointsToBeDisabled(bp11)
-            //
-            //              session.resumetoSuspension()
             project ! DebugContinueReq(DebugThreadId(1))
             expectMsg(TrueResponse)
-            //              session.checkStackFrame(BP_TYPENAME, "simple1()V", 13)
+
             asyncHelper.expectMsg(DebugBreakEvent(DebugThreadId(1), "main", breakpointsFile, 13))
-            //
-            //              bp11.setEnabled(true); bp13.setEnabled(false)
+
             project ! DebugSetBreakReq(breakpointsFile, 11)
             expectMsg(TrueResponse)
             project ! DebugClearBreakReq(breakpointsFile, 13)
             expectMsg(TrueResponse)
 
-            //
-            //              session.waitForBreakpointsToBeEnabled(bp11)
-            //              session.waitForBreakpointsToBeDisabled(bp13)
-            //
-            //              session.resumetoSuspension()
-            //              session.checkStackFrame(BP_TYPENAME, "simple1()V", 11)
             project ! DebugContinueReq(DebugThreadId(1))
             expectMsg(TrueResponse)
 
             asyncHelper.expectMsg(DebugBreakEvent(DebugThreadId(1), "main", breakpointsFile, 11))
-            //
-            //              session.resumetoSuspension()
-            //              session.checkStackFrame(BP_TYPENAME, "simple1()V", 11)
+
             project ! DebugContinueReq(DebugThreadId(1))
             expectMsg(TrueResponse)
             asyncHelper.expectMsg(DebugBreakEvent(DebugThreadId(1), "main", breakpointsFile, 11))
-            //
+
             project ! DebugContinueReq(DebugThreadId(1))
             expectMsg(TrueResponse)
-
-            //asyncHelper.expectAsync(60 seconds, DebugVMDisconnectEvent)
-            //              session.resumeToCompletion()
-            //              bp11.delete()
-            //              bp13.delete()
           }
       }
     }
@@ -277,9 +251,13 @@ trait DebugTestUtils {
   this: ProjectFixture with Matchers with EnsimeConfigFixture =>
 
   /**
-   * @param fileName to place the breakpoint
+   * Launches a new JVM using the given class name as the entrypoint. Pauses
+   * the JVM at the specified source path and line.
+   *
    * @param className containing the main method
+   * @param fileName to place the breakpoint
    * @param breakLine where to start the session in the fileName
+   * @param f The test code to execute
    */
   def withDebugSession(
     className: String,

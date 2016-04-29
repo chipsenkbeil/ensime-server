@@ -8,6 +8,7 @@ import org.ensime.api._
 import org.scaladebugger.api.dsl.Implicits._
 import org.scaladebugger.api.lowlevel.breakpoints.{ BreakpointRequestInfo, PendingBreakpointSupportLike }
 import org.scaladebugger.api.lowlevel.events.EventType
+import org.scaladebugger.api.lowlevel.events.misc.NoResume
 import org.scaladebugger.api.lowlevel.requests.properties.SuspendPolicyProperty
 import org.scaladebugger.api.profiles.traits.info._
 import org.scaladebugger.api.virtualmachines.{ ObjectCache, ScalaVirtualMachine }
@@ -149,7 +150,8 @@ class DebugActor private (
         // NOTE: If Scala Debugger API needs to change to match the old
         //       functionality, just need to change the low-level class
         //       manager's linesAndLocationsForFile method.
-        s.tryGetOrCreateBreakpointRequest(fileName, line) match {
+        val options = Seq(SuspendPolicyProperty.AllThreads, NoResume)
+        s.tryGetOrCreateBreakpointRequest(fileName, line, options: _*) match {
           case Success(bp) =>
             val isPending = s.isBreakpointRequestPending(fileName, line)
 
@@ -249,17 +251,13 @@ class DebugActor private (
     case DebugBacktraceReq(threadId: DebugThreadId, index: Int, count: Int) =>
       sender ! withThread(threadId.id, {
         case (s, t) =>
-          println("TEST 1")
           val frames = t.frames(index, count)
 
           // Cache each stack frame's "this" reference
-          println("TEST 2")
-          frames.foreach(_.thisObject.cache())
+          frames.foreach(_.thisObjectOption.foreach(_.cache()))
 
-          println("TEST 3")
           val ensimeFrames = frames.map(converter.makeStackFrame)
 
-          println("TEST 4")
           DebugBacktrace(ensimeFrames.toList, DebugThreadId(t.uniqueId), t.name)
       })
 
@@ -267,12 +265,13 @@ class DebugActor private (
     case DebugValueReq(location) =>
       sender ! withVM(s =>
         lookupValue(s.cache, location)
+          .map(a => { println("HERE 1: " + a); a })
           .map(converter.makeDebugValue)
+          .map(a => { println("HERE 2: " + a); a })
           .getOrElse(FalseResponse))
 
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
-      // TODO: Exception is cached when an exception event is received
       sender ! withVM(s =>
         lookupValue(s.cache, location)
           .map(_.toPrettyString)
@@ -284,7 +283,7 @@ class DebugActor private (
       sender ! withVM(s => {
         location match {
           case DebugStackSlot(threadId, frame, offset) => s.tryThread(threadId.id) match {
-            case Success(t) =>
+            case Success(t) => suspendAndExecute(t, {
               // Find the variable and set its value
               t.findVariableByIndex(frame, offset).flatMap {
                 case v =>
@@ -298,6 +297,8 @@ class DebugActor private (
 
                   v.trySetValueFromInfo(actualNewValue).toOption
               }.map(_ => TrueResponse).getOrElse(FalseResponse)
+            }).getOrElse(FalseResponse)
+
             case Failure(_) =>
               log.error(s"Unknown thread $threadId for debug-set-value")
               FalseResponse
@@ -354,16 +355,11 @@ class DebugActor private (
     threadId: Long,
     action: (ScalaVirtualMachine, ThreadInfoProfile) => T
   ): RpcResponse = withVM(s => {
-    val result = s.tryThread(threadId).flatMap(t => {
-      Try(t.toJdiInstance.suspend())
-      val result = Try(action(s, t))
-      Try(t.toJdiInstance.resume())
-      result
-    })
+    val result = s.tryThread(threadId).flatMap(t =>
+      suspendAndExecute(t, action(s, t)))
 
     // Report error information
     result.failed.foreach(e => {
-      println("ERROR: " + e + "\n" + e.getStackTrace.mkString("\n"))
       log.warning(s"Unable to retrieve thread with id: $threadId", e)
     })
 
@@ -392,6 +388,21 @@ class DebugActor private (
       log.warning(s"Ambiguous file $fileName, choosing ${choice.get}")
 
     choice
+  }
+
+  /**
+   * Suspends the given thread, performs the action, and resumes the thread.
+   *
+   * @param threadInfo The thread to suspend
+   * @param action The action to perform
+   * @tparam T The return type of the action
+   * @return Success containing the result of the action, otherwise a failure
+   */
+  private def suspendAndExecute[T](threadInfo: ThreadInfoProfile, action: => T): Try[T] = {
+    Try(threadInfo.toJdiInstance.suspend())
+    val result = Try(action)
+    Try(threadInfo.toJdiInstance.resume())
+    result
   }
 
   /**
