@@ -306,6 +306,36 @@ class DebugTest extends EnsimeSpec
     }
   }
 
+  // Run via `sbt "core/it:testOnly org.ensime.intg.DebugTest -- -l Debugger"`
+  they should "be retrievable for the BugFromGitter scenario" taggedAs ( /*Debugger, */ org.scalatest.Tag("chip")) in withEnsimeConfig { implicit config =>
+    withTestKit { implicit testkit =>
+      withProject { (project, asyncHelper) =>
+        implicit val p = (project, asyncHelper)
+        withDebugSession(
+          "variables.BugFromGitter",
+          "variables/BugFromGitter.scala",
+          20
+        ) { (threadId, variablesFile) =>
+            import testkit._
+
+            println("checking for actualtimes")
+            getVariableAsString(threadId, "actualTimes").text should be("10")
+
+            // Not possible to find with pure as the name is
+            // ...BugInGitter$$name
+            //println("checking for name")
+            //getVariableAsString(threadId, "name").text should be("rory")
+
+            // Seems to fail due to the field being a primitive and primitives not
+            // being supported on fields in Ensime (need another message type like 
+            // DebugPrimitiveField(...))
+            //println("checking times")
+            //getVariableAsString(threadId, "times").text should be("5")
+          }
+      }
+    }
+  }
+
   they should "set variable values" taggedAs Debugger in withEnsimeConfig { implicit config =>
     withTestKit { implicit testkit =>
       withProject { (project, asyncHelper) =>

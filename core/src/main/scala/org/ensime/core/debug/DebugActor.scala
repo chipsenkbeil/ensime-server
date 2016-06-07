@@ -194,21 +194,30 @@ class DebugActor private (
       sender ! withThread(threadId.id, {
         case (s, t) =>
           if (name == "this") {
+            println("Trying to get this object from top frame")
             t.tryTopFrame.flatMap(_.tryThisObject).map {
               case objectReference =>
+                println(s"Found this object on top frame")
                 DebugObjectReference(objectReference.cache().uniqueId)
             }.getOrElse(FalseResponse)
           } else {
-            t.findVariableByName(name).flatMap {
+            println(s"Looking for variable called $name")
+            val tr = scala.util.Try(t.findVariableByName(name))
+            println(s"Result: $tr")
+            tr.get.flatMap {
               case v: IndexedVariableInfoProfile =>
+                println(s"Found local variable for $name")
                 Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
               case v if v.isField => v.toValueInfo match {
                 case o if o.isObject =>
+                  println(s"Found object field for $name")
                   val oo = o.toObjectInfo
                   Some(DebugObjectField(DebugObjectId(oo.cache().uniqueId), v.name))
                 case _ =>
+                  println(s"Found primitive field for $name")
                   None
               }
+              case x => println(s"Unknown value: $x"); None
             }.getOrElse(FalseResponse)
           }
       })
@@ -311,6 +320,7 @@ class DebugActor private (
     action: ScalaVirtualMachine => T
   ): RpcResponse = {
     val result = vmm.withVM(action).orElse(vmm.withDummyVM(action))
+    println(s"Getting VM: $result")
 
     // Report error information
     result.failed.foreach(log.warning("Failed to process VM action", _))
@@ -331,10 +341,12 @@ class DebugActor private (
     threadId: Long,
     action: (ScalaVirtualMachine, ThreadInfoProfile) => T
   ): RpcResponse = withVM(s => {
-    val result = s.tryThread(threadId).flatMap(t =>
-      suspendAndExecute(t, action(s, t)))
+    val result = s.tryThread(threadId)
+      .map(_.cache().asInstanceOf[ThreadInfoProfile])
+      .flatMap(t => suspendAndExecute(t, action(s, t)))
 
     // Report error information
+    println(s"Found thread with id: $threadId")
     result.failed.foreach(log.warning(s"Unable to retrieve thread with id: $threadId", _))
 
     result.getOrElse(FalseResponse)
@@ -369,11 +381,13 @@ class DebugActor private (
   ): Option[ValueInfoProfile] = location match {
     // Retrieves cached object
     case DebugObjectReference(objectId) =>
+      println(s"Looking up object from reference $objectId")
       objectCache.load(objectId.id)
 
     // Uses cached object with id to find associated field
     // Caches retrieved field object
     case DebugObjectField(objectId, fieldName) =>
+      println(s"Looking up object field from reference $objectId and field $fieldName")
       objectCache.load(objectId.id)
         .map(_.field(fieldName))
         .map(_.toValueInfo.cache())
@@ -381,6 +395,7 @@ class DebugActor private (
     // Uses cached object with id as array to find element
     // Caches retrieved element object
     case DebugArrayElement(objectId, index) =>
+      println(s"Looking up array element from reference $objectId and index $index")
       objectCache.load(objectId.id).flatMap {
         case a: ArrayInfoProfile => Some(a)
         case _ => None
@@ -388,13 +403,16 @@ class DebugActor private (
 
     // Caches retrieved slot object
     case DebugStackSlot(threadId, frame, offset) =>
+      println(s"Looking up object from thread $threadId, frame $frame, and offset $offset")
       objectCache.load(threadId.id).flatMap {
         case t: ThreadInfoProfile => Some(t)
         case _ => None
       }.flatMap(_.findVariableByIndex(frame, offset)).map(_.toValueInfo.cache())
 
     // Unrecognized location request, so return nothing
-    case _ => None
+    case _ =>
+      println(s"Unknown location: $location")
+      None
   }
 
   /**
