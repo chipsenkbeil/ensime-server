@@ -318,19 +318,11 @@ class DebugTest extends EnsimeSpec
         ) { (threadId, variablesFile) =>
             import testkit._
 
-            println("checking for actualtimes")
             getVariableAsString(threadId, "actualTimes").text should be("10")
 
-            // Not possible to find with pure as the name is
-            // ...BugInGitter$$name
-            //println("checking for name")
-            //getVariableAsString(threadId, "name").text should be("rory")
+            getVariableAsString(threadId, "name").text should be("rory")
 
-            // Seems to fail due to the field being a primitive and primitives not
-            // being supported on fields in Ensime (need another message type like 
-            // DebugPrimitiveField(...))
-            //println("checking times")
-            //getVariableAsString(threadId, "times").text should be("5")
+            getVariableAsString(threadId, "times").text should be("5")
           }
       }
     }

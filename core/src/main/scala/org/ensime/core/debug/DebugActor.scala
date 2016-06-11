@@ -208,16 +208,17 @@ class DebugActor private (
               case v: IndexedVariableInfoProfile =>
                 println(s"Found local variable for $name")
                 Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
-              case v if v.isField => v.toValueInfo match {
-                case o if o.isObject =>
-                  println(s"Found object field for $name")
-                  val oo = o.toObjectInfo
-                  Some(DebugObjectField(DebugObjectId(oo.cache().uniqueId), v.name))
-                case _ =>
-                  println(s"Found primitive field for $name")
+              case f: FieldVariableInfoProfile => f.parent match {
+                case Left(o) =>
+                  Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), f.name))
+                case Right(r) =>
+                  log.error(s"Field $name is unable to be located because it is static!")
                   None
               }
-              case x => println(s"Unknown value: $x"); None
+              case x =>
+                println(s"Unknown value: $x")
+                log.error(s"Unknown value: $x")
+                None
             }.getOrElse(FalseResponse)
           }
       })
@@ -239,14 +240,14 @@ class DebugActor private (
     // ========================================================================
     case DebugValueReq(location) =>
       sender ! withVM(s =>
-        lookupValue(s.cache, location)
+        lookupValue(s, s.cache, location)
           .map(converter.convertValue)
           .getOrElse(FalseResponse))
 
     // ========================================================================
     case DebugToStringReq(threadId, location) =>
       sender ! withVM(s =>
-        lookupValue(s.cache, location)
+        lookupValue(s, s.cache, location)
           .map(_.toPrettyString)
           .map(StringResponse(_))
           .getOrElse(FalseResponse))
@@ -342,7 +343,7 @@ class DebugActor private (
     action: (ScalaVirtualMachine, ThreadInfoProfile) => T
   ): RpcResponse = withVM(s => {
     val result = s.tryThread(threadId)
-      .map(_.cache().asInstanceOf[ThreadInfoProfile])
+      .map(_.cache())
       .flatMap(t => suspendAndExecute(t, action(s, t)))
 
     // Report error information
@@ -370,12 +371,15 @@ class DebugActor private (
   /**
    * Finds a value using the provided object cache and location information.
    *
+   * @param scalaVirtualMachine The virtual machine to use as a fallback in
+   *                            various cases when the cache is empty
    * @param objectCache The object cache used to retrieve the value or
    *                    another object associated with the value
    * @param location The Ensime location information for the value to retrieve
    * @return Some value profile if the value is found, otherwise None
    */
   private def lookupValue(
+    scalaVirtualMachine: ScalaVirtualMachine,
     objectCache: ObjectCache,
     location: DebugLocation
   ): Option[ValueInfoProfile] = location match {
@@ -404,7 +408,8 @@ class DebugActor private (
     // Caches retrieved slot object
     case DebugStackSlot(threadId, frame, offset) =>
       println(s"Looking up object from thread $threadId, frame $frame, and offset $offset")
-      objectCache.load(threadId.id).flatMap {
+      val s = scalaVirtualMachine
+      objectCache.load(threadId.id).orElse(s.tryThread(threadId.id).toOption).flatMap {
         case t: ThreadInfoProfile => Some(t)
         case _ => None
       }.flatMap(_.findVariableByIndex(frame, offset)).map(_.toValueInfo.cache())
