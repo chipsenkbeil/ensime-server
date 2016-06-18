@@ -194,29 +194,24 @@ class DebugActor private (
       sender ! withThread(threadId.id, {
         case (s, t) =>
           if (name == "this") {
-            println("Trying to get this object from top frame")
             t.tryTopFrame.flatMap(_.tryThisObject).map {
               case objectReference =>
-                println(s"Found this object on top frame")
                 DebugObjectReference(objectReference.cache().uniqueId)
             }.getOrElse(FalseResponse)
           } else {
-            println(s"Looking for variable called $name")
-            val tr = scala.util.Try(t.findVariableByName(name))
-            println(s"Result: $tr")
-            tr.get.flatMap {
+            val result = t.findVariableByName(name).map(_.cache())
+            result.flatMap {
               case v: IndexedVariableInfoProfile =>
-                println(s"Found local variable for $name")
-                Some(DebugStackSlot(DebugThreadId(t.cache().uniqueId), v.frameIndex, v.offsetIndex))
+                Some(DebugStackSlot(DebugThreadId(t.uniqueId), v.frameIndex, v.offsetIndex))
               case f: FieldVariableInfoProfile => f.parent match {
                 case Left(o) =>
-                  Some(DebugObjectField(DebugObjectId(o.cache().uniqueId), f.name))
+                  o.cache()
+                  Some(DebugObjectField(DebugObjectId(o.uniqueId), f.name))
                 case Right(r) =>
                   log.error(s"Field $name is unable to be located because it is static!")
                   None
               }
               case x =>
-                println(s"Unknown value: $x")
                 log.error(s"Unknown value: $x")
                 None
             }.getOrElse(FalseResponse)
@@ -241,6 +236,7 @@ class DebugActor private (
     case DebugValueReq(location) =>
       sender ! withVM(s =>
         lookupValue(s, s.cache, location)
+          .map(_.cache())
           .map(converter.convertValue)
           .getOrElse(FalseResponse))
 
@@ -248,6 +244,7 @@ class DebugActor private (
     case DebugToStringReq(threadId, location) =>
       sender ! withVM(s =>
         lookupValue(s, s.cache, location)
+          .map(_.cache())
           .map(_.toPrettyString)
           .map(StringResponse(_))
           .getOrElse(FalseResponse))

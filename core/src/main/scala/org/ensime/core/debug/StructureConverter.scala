@@ -19,7 +19,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
    * @return The equivalent Ensime message
    */
   def convertValue(valueInfo: ValueInfoProfile): DebugValue = {
-    valueInfo match {
+    valueInfo.cache() match {
       case v if v.isNull => newDebugNull()
       case v if v.isVoid => convertVoid(v)
       case v if v.isArray => convertArray(v.toArrayInfo)
@@ -128,7 +128,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
     var fields = List[DebugClassField]()
     var tpe: Option[ClassTypeInfoProfile] = Some(tpeIn.toClassType)
     while (tpe.nonEmpty) {
-      fields = tpe.map(_.indexedVisibleFields)
+      fields = tpe.map(_.indexedVisibleFields.map(_.cache()))
         .map(s => s.map(f => DebugClassField(
           f.offsetIndex,
           f.name,
@@ -182,6 +182,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
   private def convertStackLocal(
     variableInfo: VariableInfoProfile
   ): DebugStackLocal = {
+    variableInfo.cache()
     DebugStackLocal(
       variableInfo.offsetIndex,
       variableInfo.name,
