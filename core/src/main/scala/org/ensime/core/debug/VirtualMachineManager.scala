@@ -2,6 +2,7 @@ package org.ensime.core.debug
 
 import com.sun.jdi.VMDisconnectedException
 import org.scaladebugger.api.debuggers.{ AttachingDebugger, Debugger, LaunchingDebugger }
+import org.scaladebugger.api.profiles.scala210.Scala210DebugProfile
 import org.scaladebugger.api.virtualmachines.{ DummyScalaVirtualMachine, ScalaVirtualMachine }
 import org.slf4j.LoggerFactory
 
@@ -73,6 +74,10 @@ class VirtualMachineManager(
 
         (d, s)
     }
+
+    // NOTE: This should be done before pending requests are applied, but
+    //       the debugger api does not have this yet
+    s.use(Scala210DebugProfile.Name)
 
     // Bind our event handlers like class prepare and thread start/stop
     bindEvents(s)

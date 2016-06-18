@@ -320,7 +320,7 @@ class DebugTest extends EnsimeSpec
 
             getVariableAsString(threadId, "actualTimes").text should be("10")
 
-            getVariableAsString(threadId, "name").text should be("rory")
+            getVariableAsString(threadId, "name").text should be("\"Rory\"")
 
             getVariableAsString(threadId, "times").text should be("5")
           }
