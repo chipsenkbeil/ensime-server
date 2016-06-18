@@ -314,7 +314,7 @@ class DebugTest extends EnsimeSpec
         withDebugSession(
           "variables.BugFromGitter",
           "variables/BugFromGitter.scala",
-          20
+          31
         ) { (threadId, variablesFile) =>
             import testkit._
 
@@ -323,6 +323,14 @@ class DebugTest extends EnsimeSpec
             getVariableAsString(threadId, "name").text should be("\"Rory\"")
 
             getVariableAsString(threadId, "times").text should be("5")
+
+            getVariableAsString(threadId, "arrayTest").text should be("Array(length = 4)[1,2,3,...]")
+
+            getVariableAsString(threadId, "listTest").text should
+              startWith("Instance of scala.collection.immutable.$colon$colon")
+
+            getVariableAsString(threadId, "person").text should
+              startWith("Instance of variables.Person")
           }
       }
     }
