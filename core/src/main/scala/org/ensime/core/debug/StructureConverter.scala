@@ -128,7 +128,7 @@ class StructureConverter(private val sourceMap: SourceMap) {
     var fields = List[DebugClassField]()
     var tpe: Option[ClassTypeInfoProfile] = Some(tpeIn.toClassType)
     while (tpe.nonEmpty) {
-      fields = tpe.map(_.indexedVisibleFields.map(_.cache()))
+      fields = tpe.map(_.indexedVisibleFields)
         .map(s => s.map(f => DebugClassField(
           f.offsetIndex,
           f.name,

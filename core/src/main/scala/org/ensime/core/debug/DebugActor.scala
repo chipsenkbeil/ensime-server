@@ -194,9 +194,8 @@ class DebugActor private (
       sender ! withThread(threadId.id, {
         case (s, t) =>
           if (name == "this") {
-            t.tryTopFrame.flatMap(_.tryThisObject).map {
-              case objectReference =>
-                DebugObjectReference(objectReference.cache().uniqueId)
+            t.tryTopFrame.flatMap(_.tryThisObject).map(_.cache()).map {
+              case objRef => DebugObjectReference(objRef.uniqueId)
             }.getOrElse(FalseResponse)
           } else {
             val result = t.findVariableByName(name).map(_.cache())
