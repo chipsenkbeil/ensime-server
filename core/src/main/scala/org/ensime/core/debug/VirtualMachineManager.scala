@@ -66,7 +66,11 @@ class VirtualMachineManager(
           suspend = true
         ).withPending(dummyScalaVirtualMachine)
 
-        val s = d.start(timeout = 10.seconds, startProcessingEvents = false)
+        val s = d.start(
+          timeout = 10.seconds,
+          defaultProfile = Scala210DebugProfile.Name,
+          startProcessingEvents = false
+        )
 
         (d, s)
 
@@ -76,14 +80,14 @@ class VirtualMachineManager(
           hostname = hostname
         ).withPending(dummyScalaVirtualMachine)
 
-        val s = d.start(timeout = 10.seconds, startProcessingEvents = false)
+        val s = d.start(
+          timeout = 10.seconds,
+          defaultProfile = Scala210DebugProfile.Name,
+          startProcessingEvents = false
+        )
 
         (d, s)
     }
-
-    // NOTE: This should be done before pending requests are applied, but
-    //       the debugger api does not have this yet
-    s.use(Scala210DebugProfile.Name)
 
     // Bind our event handlers like class prepare and thread start/stop
     bindEvents(s)

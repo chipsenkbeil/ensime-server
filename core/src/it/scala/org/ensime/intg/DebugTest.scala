@@ -306,8 +306,7 @@ class DebugTest extends EnsimeSpec
     }
   }
 
-  // Run via `sbt "core/it:testOnly org.ensime.intg.DebugTest -- -l Debugger"`
-  they should "be retrievable for the BugFromGitter scenario" taggedAs ( /*Debugger, */ org.scalatest.Tag("chip")) in withEnsimeConfig { implicit config =>
+  they should "be retrievable for the BugFromGitter scenario" taggedAs Debugger in withEnsimeConfig { implicit config =>
     withTestKit { implicit testkit =>
       withProject { (project, asyncHelper) =>
         implicit val p = (project, asyncHelper)
@@ -316,8 +315,6 @@ class DebugTest extends EnsimeSpec
           "variables/BugFromGitter.scala",
           31
         ) { (threadId, variablesFile) =>
-            import testkit._
-
             getVariableAsString(threadId, "actualTimes").text should be("10")
 
             getVariableAsString(threadId, "name").text should be("\"Rory\"")
