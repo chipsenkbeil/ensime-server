@@ -20,8 +20,14 @@ class VirtualMachineManager(
     private val globalStopFunc: (ScalaVirtualMachine) => Unit = _ => {}
 ) {
   private val log = LoggerFactory.getLogger(this.getClass)
-  private lazy val dummyScalaVirtualMachine: ScalaVirtualMachine =
-    DummyScalaVirtualMachine.newInstance()
+
+  /** Create a standard dummy vm using the Scala 2.10 profile */
+  private lazy val dummyScalaVirtualMachine: ScalaVirtualMachine = {
+    val d = DummyScalaVirtualMachine.newInstance()
+    d.use(Scala210DebugProfile.Name)
+    d
+  }
+
   @volatile private var debugger: Option[Debugger] = None
   @volatile private var vm: Option[ScalaVirtualMachine] = None
   @volatile private var mode: Option[VmMode] = None

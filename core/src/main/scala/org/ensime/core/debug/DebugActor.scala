@@ -397,7 +397,7 @@ class DebugActor private (
     case DebugArrayElement(objectId, index) =>
       println(s"Looking up array element from reference $objectId and index $index")
       objectCache.load(objectId.id).flatMap {
-        case a: ArrayInfoProfile => Some(a)
+        case a if a.isArray => Some(a.toArrayInfo)
         case _ => None
       }.map(_.value(index).cache())
 
@@ -406,7 +406,7 @@ class DebugActor private (
       println(s"Looking up object from thread $threadId, frame $frame, and offset $offset")
       val s = scalaVirtualMachine
       objectCache.load(threadId.id).orElse(s.tryThread(threadId.id).toOption).flatMap {
-        case t: ThreadInfoProfile => Some(t)
+        case t if t.isThread => Some(t.toThreadInfo)
         case _ => None
       }.flatMap(_.findVariableByIndex(frame, offset)).map(_.toValueInfo.cache())
 
