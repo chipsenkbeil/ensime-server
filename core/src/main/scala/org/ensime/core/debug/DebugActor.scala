@@ -317,7 +317,6 @@ class DebugActor private (
     action: ScalaVirtualMachine => T
   ): RpcResponse = {
     val result = vmm.withVM(action).orElse(vmm.withDummyVM(action))
-    println(s"Getting VM: $result")
 
     // Report error information
     result.failed.foreach(log.warning("Failed to process VM action", _))
@@ -343,7 +342,6 @@ class DebugActor private (
       .flatMap(t => suspendAndExecute(t, action(s, t)))
 
     // Report error information
-    println(s"Found thread with id: $threadId")
     result.failed.foreach(log.warning(s"Unable to retrieve thread with id: $threadId", _))
 
     result.getOrElse(FalseResponse)
@@ -381,13 +379,13 @@ class DebugActor private (
   ): Option[ValueInfoProfile] = location match {
     // Retrieves cached object
     case DebugObjectReference(objectId) =>
-      println(s"Looking up object from reference $objectId")
+      log.debug(s"Looking up object from reference $objectId")
       objectCache.load(objectId.id)
 
     // Uses cached object with id to find associated field
     // Caches retrieved field object
     case DebugObjectField(objectId, fieldName) =>
-      println(s"Looking up object field from reference $objectId and field $fieldName")
+      log.debug(s"Looking up object field from reference $objectId and field $fieldName")
       objectCache.load(objectId.id)
         .map(_.field(fieldName))
         .map(_.toValueInfo.cache())
@@ -395,7 +393,7 @@ class DebugActor private (
     // Uses cached object with id as array to find element
     // Caches retrieved element object
     case DebugArrayElement(objectId, index) =>
-      println(s"Looking up array element from reference $objectId and index $index")
+      log.debug(s"Looking up array element from reference $objectId and index $index")
       objectCache.load(objectId.id).flatMap {
         case a if a.isArray => Some(a.toArrayInfo)
         case _ => None
@@ -403,7 +401,7 @@ class DebugActor private (
 
     // Caches retrieved slot object
     case DebugStackSlot(threadId, frame, offset) =>
-      println(s"Looking up object from thread $threadId, frame $frame, and offset $offset")
+      log.debug(s"Looking up object from thread $threadId, frame $frame, and offset $offset")
       val s = scalaVirtualMachine
       objectCache.load(threadId.id).orElse(s.tryThread(threadId.id).toOption).flatMap {
         case t if t.isThread => Some(t.toThreadInfo)
@@ -412,7 +410,7 @@ class DebugActor private (
 
     // Unrecognized location request, so return nothing
     case _ =>
-      println(s"Unknown location: $location")
+      log.error(s"Unknown location: $location")
       None
   }
 
@@ -474,7 +472,7 @@ class DebugActor private (
     scalaVirtualMachine.createEventListener(EventType.ExceptionEventType).foreach(e => {
       val ee = e.asInstanceOf[ExceptionEvent]
       val t = scalaVirtualMachine.thread(ee.thread())
-      val ex = scalaVirtualMachine.`object`(t, ee.exception())
+      val ex = scalaVirtualMachine.`object`(ee.exception())
       val lsp = if (ee.catchLocation() != null) {
         val l: LocationInfoProfile = scalaVirtualMachine.location(ee.catchLocation())
         sourceMap.newLineSourcePosition(l)
@@ -498,10 +496,10 @@ class DebugActor private (
       SuspendPolicyProperty.AllThreads
     ).foreach(e => {
       // Cache the exception object
-      scalaVirtualMachine.`object`(e.thread(), e.exception()).cache()
+      scalaVirtualMachine.`object`(e.exception()).cache()
 
       val t = scalaVirtualMachine.thread(e.thread())
-      val ex = scalaVirtualMachine.`object`(t, e.exception())
+      val ex = scalaVirtualMachine.`object`(e.exception())
       val lsp = if (e.catchLocation() != null) {
         val l: LocationInfoProfile = scalaVirtualMachine.location(e.catchLocation())
         sourceMap.newLineSourcePosition(l)
